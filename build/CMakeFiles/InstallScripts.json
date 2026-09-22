@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/elpescad/quant-ml-engine/Quant-AI/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

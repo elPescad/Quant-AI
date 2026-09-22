@@ -1,0 +1,5 @@
+# ninja log v7
+0	10951	1790117251407665292	CMakeFiles/quant_engine.dir/src/main.cpp.o	6e3c82dbf75b7e15
+10959	11179	1790117262367544048	quant_engine	2d2dfde0e2162536
+9	12634	1790117650436059234	CMakeFiles/quant_engine.dir/src/main.cpp.o	6e3c82dbf75b7e15
+12635	12865	1790117663062756446	quant_engine	2d2dfde0e2162536
