@@ -1,0 +1,28 @@
+# C++ Build outputs & CMake cache
+build/
+bin/
+*.o
+*.a
+*.so
+quant_engine
+compile_commands.json
+
+# Python virtual environment & bytecode
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Large Model Weights & Data
+models/*.pt
+*.csv
+*.parquet
+
+# IDEs & Language Server Configurations
+.vscode/
+.idea/
+.clangd
+.cache/
+.DS_Store
