@@ -13,6 +13,7 @@ class PortfolioManager {
 private:
     double cash_balance_;
     double position_units_;
+    double avg_entry_price_;
     double current_asset_price_;
     double initial_capital_;
     double fee_rate_;
@@ -29,6 +30,7 @@ public:
     PortfolioManager(double starting_cash = 10000.0, double fee_rate = 0.0005)
         : cash_balance_(starting_cash),
           position_units_(0.0),
+          avg_entry_price_(0.0),
           current_asset_price_(100.0),
           initial_capital_(starting_cash),
           fee_rate_(fee_rate),
@@ -37,7 +39,7 @@ public:
           total_trades_(0),
           winning_trades_(0)
     {
-        equity_curve_.reserve(100000);
+        equity_curve_.reserve(500000);
         log_file_.open("trades.csv");
         if (log_file_.is_open()) {
             log_file_ << "tick_id,action,price,units_traded,cash,position_units,total_equity\n";
@@ -54,17 +56,19 @@ public:
         current_asset_price_ += price_delta;
         if (current_asset_price_ <= 0.01) current_asset_price_ = 0.01;
 
-        double trade_size_usd = 1000.0;
+        double trade_size_usd = 500.0; // Reduced trade size for risk control
         double units_to_trade = trade_size_usd / current_asset_price_;
-
-        double prev_equity = get_total_equity();
 
         if (action == 2) { // BUY
             if (cash_balance_ >= trade_size_usd) {
                 double fee = trade_size_usd * fee_rate_;
                 cash_balance_ -= (trade_size_usd + fee);
+
+                // Update weighted average entry price
+                double total_cost = (position_units_ * avg_entry_price_) + trade_size_usd;
                 position_units_ += units_to_trade;
-                total_trades_++;
+                avg_entry_price_ = total_cost / position_units_;
+
                 log_trade(tick_id, "BUY", units_to_trade);
             }
         } 
@@ -72,19 +76,30 @@ public:
             if (position_units_ >= units_to_trade) {
                 double gross_proceeds = units_to_trade * current_asset_price_;
                 double fee = gross_proceeds * fee_rate_;
-                cash_balance_ += (gross_proceeds - fee);
+                double net_proceeds = gross_proceeds - fee;
+
+                // Evaluate round-trip PnL on closed units
+                double cost_basis = units_to_trade * avg_entry_price_;
+                double trade_pnl = net_proceeds - cost_basis;
+
+                cash_balance_ += net_proceeds;
                 position_units_ -= units_to_trade;
+
                 total_trades_++;
+                if (trade_pnl > 0.0) {
+                    winning_trades_++;
+                }
+
+                if (position_units_ == 0.0) {
+                    avg_entry_price_ = 0.0;
+                }
+
                 log_trade(tick_id, "SELL", units_to_trade);
             }
         }
 
         double current_equity = get_total_equity();
         equity_curve_.push_back(current_equity);
-
-        if (current_equity > prev_equity && action != 1) {
-            winning_trades_++;
-        }
 
         if (current_equity > peak_equity_) {
             peak_equity_ = current_equity;
@@ -105,7 +120,7 @@ public:
     }
 
     double get_max_drawdown() const {
-        return max_drawdown_ * 100.0; // Percentage
+        return max_drawdown_ * 100.0;
     }
 
     double get_win_rate() const {

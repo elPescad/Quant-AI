@@ -1,3 +1,4 @@
 /home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/quant_engine.dir
+/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/model_runner.dir
 /home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/edit_cache.dir
 /home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/rebuild_cache.dir

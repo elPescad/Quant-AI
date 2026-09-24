@@ -1,84 +1,73 @@
-import polars as pl
-import numpy as np
+import os
 import torch
 import torch.nn as nn
+import torch.optim as optim
+import polars as pl
 from pathlib import Path
 
-# 1. Generate synthetic high-frequency order book tick data
-np.random.seed(42)
-n_ticks = 50_000
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+DATA_FILE = PROJECT_ROOT / "data" / "market_ticks.csv"
+MODEL_DIR = PROJECT_ROOT / "models"
+MODEL_FILE = MODEL_DIR / "quant_model.pt"
 
-bid_prices = 100.0 + np.cumsum(np.random.randn(n_ticks) * 0.02)
-ask_prices = bid_prices + np.random.uniform(0.01, 0.05, size=n_ticks)
-bid_volumes = np.random.randint(10, 500, size=n_ticks)
-ask_volumes = np.random.randint(10, 500, size=n_ticks)
-
-df = pl.DataFrame({
-    "bid_price": bid_prices,
-    "ask_price": ask_prices,
-    "bid_vol": bid_volumes,
-    "ask_vol": ask_volumes,
-})
-
-# 2. Vectorized Feature Engineering with Polars
-df_features = df.with_columns([
-    ((pl.col("bid_price") + pl.col("ask_price")) / 2.0).alias("mid_price"),
-    (pl.col("ask_price") - pl.col("bid_price")).alias("spread"),
-    ((pl.col("bid_vol") - pl.col("ask_vol")) / (pl.col("bid_vol") + pl.col("ask_vol"))).alias("order_imbalance"),
-]).with_columns([
-    (pl.col("mid_price").diff(5)).alias("price_delta_5"),
-    (pl.col("mid_price").rolling_std(window_size=20)).alias("volatility_20")
-]).drop_nulls()
-
-# Define target: +1 if mid-price rises in 5 ticks, -1 if it falls, 0 otherwise
-df_features = df_features.with_columns(
-    pl.when(pl.col("mid_price").shift(-5) > pl.col("mid_price") + 0.01).then(1)
-      .when(pl.col("mid_price").shift(-5) < pl.col("mid_price") - 0.01).then(-1)
-      .otherwise(0).alias("target")
-).drop_nulls()
-
-feature_cols = ["spread", "order_imbalance", "price_delta_5", "volatility_20"]
-X_np = df_features.select(feature_cols).to_numpy()
-y_np = df_features.select("target").to_numpy().flatten() + 1  # Shift [-1, 0, 1] to class indices [0, 1, 2]
-
-# 3. Define Neural Network
 class QuantMLP(nn.Module):
-    def __init__(self, input_dim=4, hidden_dim=32, num_classes=3):
-        super().__init__()
+    def __init__(self, input_dim=4, hidden_dim=64, output_dim=3):
+        super(QuantMLP, self).__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, num_classes)
+            nn.Linear(hidden_dim, output_dim)
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         return self.net(x)
 
-model = QuantMLP()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-criterion = nn.CrossEntropyLoss()
+def train_and_export():
+    if not DATA_FILE.exists():
+        print(f"[-] Data file not found at: {DATA_FILE}")
+        return
 
-X_tensor = torch.tensor(X_np, dtype=torch.float32)
-y_tensor = torch.tensor(y_np, dtype=torch.long)
+    print(f"[+] Loading dataset from: {DATA_FILE}")
+    df = pl.read_csv(DATA_FILE)
+    
+    X = torch.tensor(df.select(["spread", "order_imbalance", "price_delta_5", "volatility_20"]).to_numpy(), dtype=torch.float32)
+    y = torch.tensor(df["target"].to_numpy(), dtype=torch.long)
 
-model.train()
-for epoch in range(10):
-    optimizer.zero_grad()
-    outputs = model(X_tensor)
-    loss = criterion(outputs, y_tensor)
-    loss.backward()
-    optimizer.step()
-    print(f"Epoch {epoch+1}/10 - Loss: {loss.item():.4f}")
+    model = QuantMLP()
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.003)
 
-# 4. Serialize Model Graph to TorchScript (.pt)
-model.eval()
-traced_script_module = torch.jit.trace(model, torch.randn(1, 4))
+    print("[+] Training PyTorch model on Persistent Alpha Data...")
+    dataset = torch.utils.data.TensorDataset(X, y)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=512, shuffle=True)
 
-models_dir = Path("models")
-models_dir.mkdir(exist_ok=True)
-output_path = models_dir / "quant_model.pt"
+    model.train()
+    for epoch in range(10):
+        total_loss = 0.0
+        for batch_X, batch_y in dataloader:
+            optimizer.zero_grad()
+            out = model(batch_X)
+            loss = criterion(out, batch_y)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        print(f"    Epoch {epoch+1}/10 - Loss: {total_loss / len(dataloader):.4f}")
 
-traced_script_module.save(output_path)
-print(f"\nModel successfully exported to {output_path.resolve()}")
+    model.eval()
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+    example_input = torch.zeros(1, 4, dtype=torch.float32)
+    traced_model = torch.jit.trace(model, example_input)
+    frozen_model = torch.jit.freeze(traced_model)
+    optimized_model = torch.jit.optimize_for_inference(frozen_model)
+
+    optimized_model.save(str(MODEL_FILE))
+    print(f"[+] TorchScript model saved to: {MODEL_FILE}")
+
+if __name__ == "__main__":
+    train_and_export()

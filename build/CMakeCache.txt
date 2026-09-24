@@ -377,7 +377,7 @@ CMAKE_VERBOSE_MAKEFILE-ADVANCED:INTERNAL=1
 //Deprecated.  Use -W[no-]deprecated instead.
 CMAKE_WARN_DEPRECATED:INTERNAL=ON
 //Details about finding Python3
-FIND_PACKAGE_MESSAGE_DETAILS_Python3:INTERNAL=[/usr/bin/python3.14][found components: Interpreter ][v3.14.7()]
+FIND_PACKAGE_MESSAGE_DETAILS_Python3:INTERNAL=[/home/elpescad/quant-ml-engine/venv/bin/python3.14][found components: Interpreter ][v3.14.7()]
 //Details about finding Torch
 FIND_PACKAGE_MESSAGE_DETAILS_Torch:INTERNAL=[/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch.so][/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/include;/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/include/torch/csrc/api/include][v()]
 //Compiler reason failure
@@ -385,10 +385,10 @@ _Python3_Compiler_REASON_FAILURE:INTERNAL=
 //Development reason failure
 _Python3_Development_REASON_FAILURE:INTERNAL=
 //Path to a program.
-_Python3_EXECUTABLE:INTERNAL=/usr/bin/python3.14
+_Python3_EXECUTABLE:INTERNAL=/home/elpescad/quant-ml-engine/venv/bin/python3.14
 //Python3 Properties
-_Python3_INTERPRETER_PROPERTIES:INTERNAL=Python;3;14;7;64;32;<none>;cpython-314-x86_64-linux-gnu;abi3;/usr/lib/python3.14;/usr/lib/python3.14;/usr/lib/python3.14/site-packages;/usr/lib/python3.14/site-packages
-_Python3_INTERPRETER_SIGNATURE:INTERNAL=3bf3d4a11a6246bc9624d29f98b51476
+_Python3_INTERPRETER_PROPERTIES:INTERNAL=Python;3;14;7;64;32;<none>;cpython-314-x86_64-linux-gnu;abi3;/usr/lib/python3.14;/home/elpescad/quant-ml-engine/venv/lib/python3.14;/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages;/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages
+_Python3_INTERPRETER_SIGNATURE:INTERNAL=e8f2ae0574dc9c43cc5cabb4e21a1695
 //NumPy reason failure
 _Python3_NumPy_REASON_FAILURE:INTERNAL=
 
