@@ -1,3 +1,5 @@
+#include <torch/torch.h>
+#include <torch/script.h>
 #include <iostream>
 #include <chrono>
 #include <vector>
@@ -7,9 +9,8 @@
 #include <atomic>
 #include <emmintrin.h>
 #include <pthread.h>
-#include <torch/torch.h>
-#include <torch/script.h>
 #include "ring_buffer.hpp"
+#include "portfolio.hpp"
 
 struct MarketTick {
     float spread;
@@ -32,14 +33,15 @@ void producer_thread_func() {
     for (int i = 0; i < TOTAL_TICKS; ++i) {
         MarketTick tick{0.02f, 0.15f, 0.05f, 0.012f};
         
-        // Low-latency busy-spin using x86 pause
         while (!event_queue.push(tick)) [[unlikely]] {
             _mm_pause();
         }
     }
 }
 
-void consumer_thread_func(torch::jit::script::Module& module, std::vector<double>& latencies_us) {
+void consumer_thread_func(torch::jit::script::Module& module, 
+                         std::vector<double>& latencies_us,
+                         PortfolioManager& portfolio) {
     torch::InferenceMode guard;
     latencies_us.reserve(TOTAL_TICKS);
 
@@ -65,19 +67,22 @@ void consumer_thread_func(torch::jit::script::Module& module, std::vector<double
             torch::Tensor logits = output.toTensor();
             int action = logits.argmax(1).item<int>();
 
+            // Process order execution through portfolio engine
+            portfolio.process_signal(ticks_processed, action, tick.price_delta_5);
+
             auto end = std::chrono::high_resolution_clock::now();
             double latency = std::chrono::duration<double, std::micro>(end - start).count();
             latencies_us.push_back(latency);
 
             ticks_processed++;
         } else {
-            _mm_pause(); // Busy spin if buffer empty
+            _mm_pause();
         }
     }
 }
 
 int main() {
-    std::cout << "=== Low-Latency Quant Engine (Hardware & Thread Optimized) ===" << std::endl;
+    std::cout << "=== Low-Latency Quant ML & Portfolio Engine ===" << std::endl;
 
     at::set_num_threads(1);
 
@@ -92,14 +97,14 @@ int main() {
     }
 
     std::vector<double> latencies_us;
+    PortfolioManager portfolio(10000.0, 0.0005); // $10,000 capital, 0.05% fee
 
-    std::cout << "[+] Spawning pinned threads (Producer: Core 1, Consumer: Core 2)..." << std::endl;
+    std::cout << "[+] Executing pipeline on pinned threads..." << std::endl;
     auto wall_clock_start = std::chrono::high_resolution_clock::now();
 
     std::thread producer(producer_thread_func);
-    std::thread consumer(consumer_thread_func, std::ref(module), std::ref(latencies_us));
+    std::thread consumer(consumer_thread_func, std::ref(module), std::ref(latencies_us), std::ref(portfolio));
 
-    // Pin producer to core 1, consumer to core 2
     pin_thread(producer, 1);
     pin_thread(consumer, 2);
 
@@ -116,12 +121,21 @@ int main() {
     double p99 = latencies_us[TOTAL_TICKS * 0.99];
     double throughput = TOTAL_TICKS / total_wall_time_sec;
 
-    std::cout << "\n=== Hardware Benchmarks ===" << std::endl;
+    std::cout << "\n=== Systems & Hardware Benchmarks ===" << std::endl;
     std::cout << "Total Ticks Processed: " << TOTAL_TICKS << std::endl;
     std::cout << "Avg Model Latency:     " << avg_latency << " us" << std::endl;
     std::cout << "p50 Latency:           " << p50 << " us" << std::endl;
     std::cout << "p99 Latency:           " << p99 << " us" << std::endl;
     std::cout << "System Throughput:     " << static_cast<uint64_t>(throughput) << " predictions/sec" << std::endl;
+
+    std::cout << "\n=== Strategy Performance & Risk Metrics ===" << std::endl;
+    std::cout << "Starting Capital:  $" << 10000.00 << " USD" << std::endl;
+    std::cout << "Ending Equity:     $" << portfolio.get_total_equity() << " USD" << std::endl;
+    std::cout << "Total Net PnL:     $" << portfolio.get_pnl() << " USD (" 
+              << (portfolio.get_pnl() / 10000.0) * 100.0 << "%)" << std::endl;
+    std::cout << "Win Rate:          " << portfolio.get_win_rate() << " %" << std::endl;
+    std::cout << "Max Drawdown:      " << portfolio.get_max_drawdown() << " %" << std::endl;
+    std::cout << "Sharpe Ratio:      " << portfolio.calculate_sharpe_ratio() << std::endl;
 
     return 0;
 }

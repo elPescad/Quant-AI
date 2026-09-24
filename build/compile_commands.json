@@ -1,1 +1,8 @@
-build/compile_commands.json
+[
+{
+  "directory": "/home/elpescad/quant-ml-engine/Quant-AI/build",
+  "command": "/usr/bin/c++ -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -isystem /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/include -isystem /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/include/torch/csrc/api/include -std=gnu++20 -o CMakeFiles/quant_engine.dir/src/main.cpp.o -c /home/elpescad/quant-ml-engine/Quant-AI/src/main.cpp",
+  "file": "/home/elpescad/quant-ml-engine/Quant-AI/src/main.cpp",
+  "output": "/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/quant_engine.dir/src/main.cpp.o"
+}
+]
