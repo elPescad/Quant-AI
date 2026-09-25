@@ -9,21 +9,101 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
+#include <cmath>
+#include <unordered_map>
 #include <emmintrin.h>
 #include <pthread.h>
-
 #include "ring_buffer.hpp"
 #include "portfolio.hpp"
 
+constexpr int SEQ_LEN = 10;
+
 struct MarketTick {
     int id;
-    float spread;
-    float order_imbalance;
-    float price_delta_5;
-    float volatility_20;
+    char ticker[8];
+    float raw_price;
+    float raw_spread;
+    float raw_ofi;
+    float raw_delta;
+    float raw_vol;
 };
 
-LockFreeRingBuffer<MarketTick, 4096> event_queue;
+// Dynamic EWMA Standardizer (Forgets old data to handle non-stationarity)
+class EWMStandardizer {
+private:
+    double alpha;
+    double mean = 0.0;
+    double variance = 0.0;
+    bool initialized = false;
+    uint64_t count = 0;
+
+public:
+    EWMStandardizer(int span = 500) {
+        // Standard formula to convert span to alpha factor
+        alpha = 2.0 / (span + 1.0); 
+    }
+
+    void update(double x) {
+        count++;
+        if (!initialized) {
+            mean = x;
+            variance = 0.0;
+            initialized = true;
+            return;
+        }
+        
+        double delta = x - mean;
+        mean += alpha * delta;
+        // EMA variance calculation
+        variance = (1.0 - alpha) * (variance + alpha * delta * delta);
+    }
+
+    uint64_t get_count() const { return count; }
+
+    float normalize(double x) const {
+        if (!initialized || count < 10) return 0.0f;
+        
+        double stddev = std::sqrt(variance);
+        if (stddev < 1e-6) return 0.0f;
+        
+        double z = (x - mean) / stddev;
+        return static_cast<float>(std::clamp(z, -4.0, 4.0));
+    }
+};
+
+// Fast Circular Buffer for GRU memory window
+struct RollingWindow {
+    float data[SEQ_LEN * 4] = {0.0f};
+    int head = 0;
+    int count = 0;
+
+    void push(float f1, float f2, float f3, float f4) {
+        int base = head * 4;
+        data[base] = f1;
+        data[base+1] = f2;
+        data[base+2] = f3;
+        data[base+3] = f4;
+        
+        head = (head + 1) % SEQ_LEN;
+        if (count < SEQ_LEN) count++;
+    }
+
+    // Flattens the circular buffer into chronological order for PyTorch
+    void fill_tensor(float* tensor_data) const {
+        int idx = (count < SEQ_LEN) ? 0 : head;
+        for (int i = 0; i < count; i++) {
+            int base_src = idx * 4;
+            int base_dst = i * 4;
+            tensor_data[base_dst] = data[base_src];
+            tensor_data[base_dst+1] = data[base_src+1];
+            tensor_data[base_dst+2] = data[base_src+2];
+            tensor_data[base_dst+3] = data[base_src+3];
+            idx = (idx + 1) % SEQ_LEN;
+        }
+    }
+};
+
+LockFreeRingBuffer<MarketTick, 8192> event_queue;
 std::atomic<bool> stream_finished(false);
 
 void pin_thread_to_core(std::thread& th, int core_id) {
@@ -42,24 +122,29 @@ void file_stream_producer(const std::string& csv_file) {
     }
 
     std::string line;
-    std::getline(file, line);
+    std::getline(file, line); // Skip header
 
     int tick_id = 0;
     while (std::getline(file, line)) {
         std::stringstream ss(line);
-        std::string v1, v2, v3, v4;
+        std::string sym, p, s, o, d, v, target;
 
-        if (std::getline(ss, v1, ',') &&
-            std::getline(ss, v2, ',') &&
-            std::getline(ss, v3, ',') &&
-            std::getline(ss, v4, ',')) {
+        if (std::getline(ss, sym, ',') &&
+            std::getline(ss, p, ',') &&
+            std::getline(ss, s, ',') &&
+            std::getline(ss, o, ',') &&
+            std::getline(ss, d, ',') &&
+            std::getline(ss, v, ',')) {
 
             MarketTick tick;
             tick.id = tick_id++;
-            tick.spread = std::stof(v1);
-            tick.order_imbalance = std::stof(v2);
-            tick.price_delta_5 = std::stof(v3);
-            tick.volatility_20 = std::stof(v4);
+            std::strncpy(tick.ticker, sym.c_str(), sizeof(tick.ticker) - 1);
+            tick.ticker[sizeof(tick.ticker) - 1] = '\0';
+            tick.raw_price = std::stof(p);
+            tick.raw_spread = std::stof(s);
+            tick.raw_ofi = std::stof(o);
+            tick.raw_delta = std::stof(d);
+            tick.raw_vol = std::stof(v);
 
             while (!event_queue.push(tick)) [[unlikely]] {
                 _mm_pause();
@@ -75,9 +160,15 @@ void execution_consumer(torch::jit::script::Module& module,
     torch::InferenceMode guard;
     latencies_us.reserve(500000);
 
-    torch::Tensor input_tensor = torch::zeros({1, 4}, torch::kFloat32);
+    std::unordered_map<std::string, EWMStandardizer> acc_spread, acc_ofi, acc_delta, acc_vol;
+    std::unordered_map<std::string, RollingWindow> ticker_memory;
+
+    // Change input tensor shape to [1, 10, 4] for GRU
+    torch::Tensor input_tensor = torch::zeros({1, SEQ_LEN, 4}, torch::kFloat32);
     float* raw_data = input_tensor.data_ptr<float>();
 
+    std::unordered_map<std::string, int> last_trade_tick;
+    const int COOLDOWN_TICKS = 100;
     while (!stream_finished || event_queue.pop().has_value()) {
         auto popped = event_queue.pop();
         
@@ -85,29 +176,77 @@ void execution_consumer(torch::jit::script::Module& module,
             auto start = std::chrono::high_resolution_clock::now();
 
             MarketTick tick = popped.value();
+            std::string sym(tick.ticker);
 
-            raw_data[0] = tick.spread;
-            raw_data[1] = tick.order_imbalance;
-            raw_data[2] = tick.price_delta_5;
-            raw_data[3] = tick.volatility_20;
+            acc_spread[sym].update(tick.raw_spread);
+            acc_ofi[sym].update(tick.raw_ofi);
+            acc_delta[sym].update(tick.raw_delta);
+            acc_vol[sym].update(tick.raw_vol);
+
+            float n_spread = acc_spread[sym].normalize(tick.raw_spread);
+            float n_ofi    = acc_ofi[sym].normalize(tick.raw_ofi);
+            float n_delta  = acc_delta[sym].normalize(tick.raw_delta);
+            float n_vol    = acc_vol[sym].normalize(tick.raw_vol);
+
+            // Push current tick into the ticker's memory window
+            ticker_memory[sym].push(n_spread, n_ofi, n_delta, n_vol);
+
+            // Wait for enough stats AND enough ticks to fill the GRU window
+            if (acc_spread[sym].get_count() < 30 || ticker_memory[sym].count < SEQ_LEN) {
+                portfolio.process_signal(tick.id, sym, 1, tick.raw_price, tick.raw_spread);
+                continue;
+            }
+
+            // Populate the [1, 10, 4] tensor sequentially
+            ticker_memory[sym].fill_tensor(raw_data);
 
             c10::IValue output = module.forward({input_tensor});
             torch::Tensor logits = output.toTensor();
-
             torch::Tensor probs = torch::softmax(logits, 1);
             auto max_prob_result = probs.max(1);
 
-            int action = std::get<1>(max_prob_result).item<int>();
-            float confidence = std::get<0>(max_prob_result).item<float>();
+            // Extract raw class probabilities
+            float prob_sell = probs[0][0].item<float>();
+            float prob_hold = probs[0][1].item<float>();
+            float prob_buy  = probs[0][2].item<float>();
 
-            // Require 60% confidence before committing capital
-            if (confidence < 0.60f) {
-                action = 1; // HOLD
+            int action = 1; // Default to HOLD
+
+            // 1. High-Conviction LONG Signal
+            if (prob_buy > prob_hold && prob_buy > prob_sell) {
+                if ((prob_buy - prob_sell) >= 0.15f && prob_buy >= 0.45f) {
+                    if (tick.id - last_trade_tick[sym] > COOLDOWN_TICKS) {
+                        action = 2; // BUY / LONG
+                        last_trade_tick[sym] = tick.id;
+                    }
+                }
+            }
+            // 2. High-Conviction SHORT Signal
+            else if (prob_sell > prob_hold && prob_sell > prob_buy) {
+                if ((prob_sell - prob_buy) >= 0.15f && prob_sell >= 0.45f) {
+                    if (tick.id - last_trade_tick[sym] > COOLDOWN_TICKS) {
+                        action = 0; // SELL / SHORT
+                        last_trade_tick[sym] = tick.id;
+                    }
+                }
             }
 
-            portfolio.process_signal(tick.id, action, tick.price_delta_5);
+            // CALL THIS EXACTLY ONCE!
+            portfolio.process_signal(tick.id, sym, action, tick.raw_price, tick.raw_spread);
+
+            //Ticker debugger
+            if (tick.id % 1000 == 0) {
+                std::cout << "[DEBUG] Tick " << tick.id 
+                        << " | Ticker: " << sym 
+                        << " | Raw Model Action: " << action 
+                        << " | Probs: " << probs[0][0].item<float>() << ", " 
+                        << probs[0][1].item<float>() << ", " 
+                        << probs[0][2].item<float>() << "\n";
+            }
 
             auto end = std::chrono::high_resolution_clock::now();
+
+            portfolio.process_signal(tick.id, sym, action, tick.raw_price, tick.raw_spread);
             double latency = std::chrono::duration<double, std::micro>(end - start).count();
             latencies_us.push_back(latency);
         } else {
@@ -128,16 +267,16 @@ int main() {
     try {
         module = torch::jit::load(model_path);
         module.eval();
-        std::cout << "[+] TorchScript Model Loaded." << std::endl;
+        std::cout << "[+] TorchScript GRU Model Loaded." << std::endl;
     } catch (const c10::Error& e) {
         std::cerr << "[-] Error loading model: " << e.what() << std::endl;
         return -1;
     }
 
     std::vector<double> latencies_us;
-    PortfolioManager portfolio(10000.0, 0.0005);
+    PortfolioManager portfolio(10000.0, 0.0001); 
 
-    std::cout << "[+] Streaming market ticks from " << data_path << std::endl;
+    std::cout << "[+] Streaming raw multi-ticker market feed from " << data_path << std::endl;
     auto wall_clock_start = std::chrono::high_resolution_clock::now();
 
     std::thread producer(file_stream_producer, data_path);
@@ -153,14 +292,10 @@ int main() {
     double total_wall_time_sec = std::chrono::duration<double>(wall_clock_end - wall_clock_start).count();
     size_t total_ticks = latencies_us.size();
 
-    if (total_ticks == 0) {
-        std::cerr << "[-] No market ticks were processed." << std::endl;
-        return -1;
-    }
+    if (total_ticks == 0) return -1;
 
     std::sort(latencies_us.begin(), latencies_us.end());
-    double total_latency_us = std::accumulate(latencies_us.begin(), latencies_us.end(), 0.0);
-    double avg_latency = total_latency_us / total_ticks;
+    double avg_latency = std::accumulate(latencies_us.begin(), latencies_us.end(), 0.0) / total_ticks;
     double p50 = latencies_us[total_ticks * 0.50];
     double p99 = latencies_us[total_ticks * 0.99];
     double throughput = total_ticks / total_wall_time_sec;
@@ -169,7 +304,7 @@ int main() {
     std::cout << "          SYSTEM & HARDWARE BENCHMARKS            " << std::endl;
     std::cout << "==================================================" << std::endl;
     std::cout << "Total Ticks Processed: " << total_ticks << std::endl;
-    std::cout << "Avg Model Latency:     " << avg_latency << " us" << std::endl;
+    std::cout << "Avg GRU Model Latency: " << avg_latency << " us" << std::endl;
     std::cout << "p50 Latency:           " << p50 << " us" << std::endl;
     std::cout << "p99 Latency:           " << p99 << " us" << std::endl;
     std::cout << "Throughput:            " << static_cast<uint64_t>(throughput) << " predictions/sec" << std::endl;
