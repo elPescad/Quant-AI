@@ -7,6 +7,7 @@
 template <typename T, size_t Capacity>
 class LockFreeRingBuffer {
 public:
+    // Ensure Capacity is a power of 2 for the bitwise Mask to work correctly
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
 
     LockFreeRingBuffer() : head_(0), tail_(0) {}
@@ -15,6 +16,7 @@ public:
         size_t current_tail = tail_.load(std::memory_order_relaxed);
         size_t current_head = head_.load(std::memory_order_acquire);
 
+        // Check if the buffer is full
         if ((current_tail - current_head) >= Capacity) {
             return false;
         }
@@ -28,6 +30,7 @@ public:
         size_t current_head = head_.load(std::memory_order_relaxed);
         size_t current_tail = tail_.load(std::memory_order_acquire);
 
+        // Check if the buffer is empty
         if (current_head == current_tail) {
             return std::nullopt;
         }
@@ -39,6 +42,8 @@ public:
 
 private:
     static constexpr size_t Mask = Capacity - 1;
+    
+    // Aligned to typical cache line size (64 bytes) to prevent false sharing
     alignas(64) std::atomic<size_t> head_;
     alignas(64) std::atomic<size_t> tail_;
     std::array<T, Capacity> buffer_;

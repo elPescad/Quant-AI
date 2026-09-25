@@ -9,14 +9,14 @@
 #include <cmath>
 #include <numeric>
 #include <algorithm>
-#include <limits> // For numeric_limits
+#include <limits>
 
 struct Position {
     double units = 0.0; // Positive for LONG, Negative for SHORT
     double avg_price = 0.0;
     double current_mid_price = 100.0;
     double highest_price_since_entry = 0.0;
-    double lowest_price_since_entry = std::numeric_limits<double>::max(); // Needed for Short trailing stop
+    double lowest_price_since_entry = std::numeric_limits<double>::max();
 };
 
 class PortfolioManager {
@@ -43,10 +43,10 @@ private:
 public:
     PortfolioManager(double starting_cash = 10000.0, 
                     double fee_rate = 0.0001, 
-                    double max_alloc_pct = 0.15,
-                    double tp_pct = 0.0150,     // 1.50% Take Profit
-                    double sl_pct = 0.0050,     // 0.50% Stop Loss (2:1 Ratio)
-                    double trail_pct = 0.0045)  // 0.45% Trailing
+                    double max_alloc_pct = 0.20,
+                    double tp_pct = 0.0160,     
+                    double sl_pct = 0.0100,     
+                    double trail_pct = 0.0050)  
         : cash_balance_(starting_cash),
           initial_capital_(starting_cash),
           fee_rate_(fee_rate),
@@ -101,7 +101,7 @@ public:
                 execute_sell(tick_id, ticker, pos, sell_fill_price, "HARD_STOP_LOSS_LONG");
                 return;
             }
-            if (total_return > 0.0006 && drawdown_from_peak >= trailing_stop_pct_) {
+            if (total_return > 0.0020 && drawdown_from_peak >= trailing_stop_pct_) {
                 execute_sell(tick_id, ticker, pos, sell_fill_price, "TRAILING_STOP_LONG");
                 return;
             }
@@ -113,10 +113,7 @@ public:
                 pos.lowest_price_since_entry = cover_fill_price;
             }
 
-            // For shorts, return is (Entry - Exit) / Entry
             double total_return = (pos.avg_price - cover_fill_price) / pos.avg_price;
-            
-            // Drawdown for shorts is how much the price bounced up from the lowest point
             double drawdown_from_peak = (cover_fill_price - pos.lowest_price_since_entry) / pos.lowest_price_since_entry;
 
             if (total_return >= take_profit_pct_) {
@@ -127,7 +124,7 @@ public:
                 execute_cover(tick_id, ticker, pos, cover_fill_price, "HARD_STOP_LOSS_SHORT");
                 return;
             }
-            if (total_return > 0.0006 && drawdown_from_peak >= trailing_stop_pct_) {
+            if (total_return > 0.0030 && drawdown_from_peak >= trailing_stop_pct_) {
                 execute_cover(tick_id, ticker, pos, cover_fill_price, "TRAILING_STOP_SHORT");
                 return;
             }
@@ -138,7 +135,6 @@ public:
         // ====================================================================
         double spread_relative = static_cast<double>(raw_spread) / pos.current_mid_price;
 
-        // Block entry if bid-ask spread friction exceeds 0.25% of share price
         if (spread_relative > 0.0025 && std::abs(pos.units) < 0.0001) {
             return;
         }
@@ -164,7 +160,7 @@ public:
                     pos.units = units_to_buy;
                     pos.avg_price = buy_fill_price;
                     pos.highest_price_since_entry = buy_fill_price;
-                    pos.lowest_price_since_entry = std::numeric_limits<double>::max(); // Reset short tracker
+                    pos.lowest_price_since_entry = std::numeric_limits<double>::max();
 
                     log_trade(tick_id, ticker, "OPEN_LONG", units_to_buy, buy_fill_price);
                 }
@@ -178,7 +174,6 @@ public:
             }
 
             if (std::abs(pos.units) < 0.0001) { // Flat, open SHORT
-                // Using cash_balance_ as a proxy for margin available
                 double max_spendable_cash = cash_balance_ / (1.0 + fee_rate_);
                 double actual_trade_usd = std::min(target_trade_usd, max_spendable_cash);
 
@@ -186,12 +181,11 @@ public:
                     double fee = actual_trade_usd * fee_rate_;
                     double units_to_short = actual_trade_usd / sell_fill_price;
 
-                    // Receiving cash for shorting (minus fee)
                     cash_balance_ += (actual_trade_usd - fee);
-                    pos.units = -units_to_short; // Negative denotes short
+                    pos.units = -units_to_short;
                     pos.avg_price = sell_fill_price;
                     pos.lowest_price_since_entry = sell_fill_price;
-                    pos.highest_price_since_entry = 0.0; // Reset long tracker
+                    pos.highest_price_since_entry = 0.0;
 
                     log_trade(tick_id, ticker, "OPEN_SHORT", units_to_short, sell_fill_price);
                 }
@@ -215,8 +209,6 @@ public:
     double get_total_equity() const {
         double position_value = 0.0;
         for (const auto& [ticker, pos] : positions_) {
-            // Because pos.units is negative for shorts, this naturally subtracts
-            // liability from the cash pool, creating perfect real-time equity.
             position_value += (pos.units * pos.current_mid_price);
         }
         return cash_balance_ + position_value;
@@ -250,7 +242,8 @@ public:
         double stdev = std::sqrt(sq_sum / returns.size());
 
         if (stdev == 0.0) return 0.0;
-        return (mean / stdev) * std::sqrt(252.0 * 390.0);
+        // Adjusted for tick data (~10,000 ticks per day annualized across 252 days)
+        return (mean / stdev) * std::sqrt(252.0 * 10000.0);
     }
 
 private:
@@ -276,13 +269,13 @@ private:
     }
 
     void execute_cover(int tick_id, const std::string& ticker, Position& pos, double fill_price, const std::string& reason) {
-        double units_to_cover = std::abs(pos.units); // Magnitude of short
+        double units_to_cover = std::abs(pos.units);
         double gross_cost = units_to_cover * fill_price;
         double fee = gross_cost * fee_rate_;
         double net_cost = gross_cost + fee;
 
         double initial_proceeds = units_to_cover * pos.avg_price;
-        double trade_pnl = initial_proceeds - net_cost; // Profit if cost is less than proceeds
+        double trade_pnl = initial_proceeds - net_cost;
 
         cash_balance_ -= net_cost;
         pos.units = 0.0;
