@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import polars as pl
 from pathlib import Path
@@ -8,66 +7,58 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 DATA_DIR = PROJECT_ROOT / "data"
 OUTPUT_FILE = DATA_DIR / "market_ticks.csv"
 
-def generate_market_ticks(num_ticks=500000):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"[+] Generating {num_ticks:,} microstructural ticks with persistent alpha...")
+# Synthetic tickers and their starting prices
+TICKERS = {"SPY": 550.0, "QQQ": 480.0, "AAPL": 225.0, "NVDA": 120.0, "MSFT": 430.0, "AMD": 150.0}
+LABEL_HORIZON = 6        # Must match fetch_real_ticks.py
+FEE_HURDLE_PCT = 0.0004  # Must match fetch_real_ticks.py
 
-    np.random.seed(42)
 
-    # 1. Generate Order Flow Imbalance via AR(1) process (Momentum/Persistence)
-    ofi = np.zeros(num_ticks, dtype=np.float32)
-    phi = 0.85 # Autoregressive momentum coefficient
-    noise_ofi = np.random.normal(0, 0.2, num_ticks)
-
+def generate_ticker(symbol, start_price, num_ticks, rng):
+    # 1. Order Flow Imbalance via AR(1) process (Momentum/Persistence)
+    phi = 0.85
+    ofi = np.zeros(num_ticks)
+    noise = rng.normal(0, 1.0, num_ticks)
     for t in range(1, num_ticks):
-        ofi[t] = phi * ofi[t-1] + noise_ofi[t]
+        ofi[t] = phi * ofi[t - 1] + noise[t]
 
-    ofi = np.clip(ofi, -1.0, 1.0)
+    # 2. Price path: returns partially driven by lagged OFI (the alpha the model should learn)
+    base_vol = 0.0008  # ~8 bps per bar
+    returns = 0.00025 * ofi / ofi.std() + rng.normal(0, base_vol, num_ticks)
+    returns = np.roll(returns, 1)
+    returns[0] = 0.0
+    close = start_price * np.exp(np.cumsum(returns))
 
-    # 2. Derive Microstructure Features
-    spread = np.clip(np.abs(np.random.normal(0.02, 0.005, num_ticks)), 0.005, 0.10).astype(np.float32)
-    volatility = (np.abs(ofi) * 0.05 + np.random.normal(0.01, 0.002, num_ticks)).astype(np.float32)
+    # 3. Microstructure features in the same RAW schema as fetch_real_ticks.py
+    price_delta = np.diff(close, prepend=close[0])
+    spread = np.clip(close * rng.normal(0.0001, 0.00003, num_ticks), 0.01, None)  # ~1 bp quoted spread
+    raw_ofi = ofi
+    volatility = np.abs(price_delta)
 
-    # 3. Microstructure Alpha Engine: Future delta is directly driven by current OFI & Spread compression
-    future_delta = (0.06 * ofi) - (0.02 * spread) + np.random.normal(0, 0.008, num_ticks)
+    future_return = (np.roll(close, -LABEL_HORIZON) - close) / close
+    future_return[-LABEL_HORIZON:] = 0.0
+    target = np.ones(num_ticks, dtype=np.int64)  # HOLD (1)
+    target[future_return > FEE_HURDLE_PCT] = 2    # BUY (2)
+    target[future_return < -FEE_HURDLE_PCT] = 0   # SELL (0)
 
-    df = pl.DataFrame({
-        "spread": spread,
-        "ofi": ofi,
-        "price_delta_5": future_delta.astype(np.float32),
-        "volatility_20": volatility
+    return pl.DataFrame({
+        "ticker": symbol,
+        "raw_price": close.astype(np.float32),
+        "raw_spread": spread.astype(np.float32),
+        "raw_ofi": raw_ofi.astype(np.float32),
+        "raw_delta": price_delta.astype(np.float32),
+        "raw_vol": volatility.astype(np.float32),
+        "target": target,
     })
 
-    # 4. Feature Engineering: Smooth OFI & Z-Score Normalization
-    df = df.with_columns([
-        pl.col("ofi").rolling_mean(window_size=5, min_samples=1).alias("ofi_sma_5")
-    ])
 
-    df = df.with_columns([
-        ((pl.col("spread") - pl.col("spread").mean()) / pl.col("spread").std()).alias("norm_spread"),
-        ((pl.col("ofi_sma_5") - pl.col("ofi_sma_5").mean()) / pl.col("ofi_sma_5").std()).alias("norm_ofi"),
-        ((pl.col("price_delta_5") - pl.col("price_delta_5").mean()) / pl.col("price_delta_5").std()).alias("norm_delta"),
-        ((pl.col("volatility_20") - pl.col("volatility_20").mean()) / pl.col("volatility_20").std()).alias("norm_vol")
-    ])
+def generate_market_ticks(ticks_per_ticker=5000, seed=42):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    frames = [generate_ticker(sym, px, ticks_per_ticker, rng) for sym, px in TICKERS.items()]
+    df = pl.concat(frames)
+    df.write_csv(OUTPUT_FILE)
+    print(f"[+] Saved {len(df):,} synthetic raw ticks to: {OUTPUT_FILE}")
 
-    # 5. Class Labeling: Equal distribution across quantiles
-    p33 = np.percentile(future_delta, 33)
-    p66 = np.percentile(future_delta, 66)
-
-    target = np.ones(num_ticks, dtype=int) # HOLD (1)
-    target[future_delta > p66] = 2         # BUY (2)
-    target[future_delta < p33] = 0         # SELL (0)
-
-    final_df = pl.DataFrame({
-        "spread": df["norm_spread"],
-        "order_imbalance": df["norm_ofi"],
-        "price_delta_5": df["norm_delta"],
-        "volatility_20": df["norm_vol"],
-        "target": target.astype(np.int64)
-    })
-
-    final_df.write_csv(OUTPUT_FILE)
-    print(f"[+] Saved microstructural dataset to: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     generate_market_ticks()

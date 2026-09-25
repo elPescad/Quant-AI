@@ -11,12 +11,15 @@
 #include <atomic>
 #include <cmath>
 #include <unordered_map>
+#include <cstring>
 #include <emmintrin.h>
 #include <pthread.h>
 #include "ring_buffer.hpp"
 #include "portfolio.hpp"
 
 constexpr int SEQ_LEN = 10;
+constexpr float SIGNAL_MARGIN = 0.10f;   // Min gap between buy and sell probability
+constexpr float MIN_SIGNAL_PROB = 0.40f; // Min probability for the winning directional class
 
 struct MarketTick {
     int id;
@@ -122,7 +125,14 @@ void file_stream_producer(const std::string& csv_file) {
     }
 
     std::string line;
-    std::getline(file, line); // Skip header
+    std::getline(file, line); // Header
+    if (line.rfind("ticker,raw_price,raw_spread,raw_ofi,raw_delta,raw_vol", 0) != 0) {
+        std::cerr << "[-] Unexpected CSV header: " << line << "\n"
+                  << "    Expected: ticker,raw_price,raw_spread,raw_ofi,raw_delta,raw_vol,target\n"
+                  << "    Regenerate data with python/fetch_real_ticks.py or python/generate_ticks.py" << std::endl;
+        stream_finished = true;
+        return;
+    }
 
     int tick_id = 0;
     while (std::getline(file, line)) {
@@ -137,14 +147,18 @@ void file_stream_producer(const std::string& csv_file) {
             std::getline(ss, v, ',')) {
 
             MarketTick tick;
+            try {
+                tick.raw_price = std::stof(p);
+                tick.raw_spread = std::stof(s);
+                tick.raw_ofi = std::stof(o);
+                tick.raw_delta = std::stof(d);
+                tick.raw_vol = std::stof(v);
+            } catch (const std::exception&) {
+                continue; // Skip malformed rows (empty / NaN fields)
+            }
             tick.id = tick_id++;
             std::strncpy(tick.ticker, sym.c_str(), sizeof(tick.ticker) - 1);
             tick.ticker[sizeof(tick.ticker) - 1] = '\0';
-            tick.raw_price = std::stof(p);
-            tick.raw_spread = std::stof(s);
-            tick.raw_ofi = std::stof(o);
-            tick.raw_delta = std::stof(d);
-            tick.raw_vol = std::stof(v);
 
             while (!event_queue.push(tick)) [[unlikely]] {
                 _mm_pause();
@@ -169,14 +183,20 @@ void execution_consumer(torch::jit::script::Module& module,
 
     std::unordered_map<std::string, int> last_trade_tick;
     const int COOLDOWN_TICKS = 100;
-    while (!stream_finished || event_queue.pop().has_value()) {
+    int last_tick_id = 0;
+    while (true) {
+        // Read the flag BEFORE popping: if the producer had already finished and the
+        // queue is empty, every tick has been consumed. (The old loop condition called
+        // pop() itself and silently threw away a tick on every check.)
+        bool producer_done = stream_finished.load(std::memory_order_acquire);
         auto popped = event_queue.pop();
-        
+
         if (popped.has_value()) [[likely]] {
             auto start = std::chrono::high_resolution_clock::now();
 
             MarketTick tick = popped.value();
             std::string sym(tick.ticker);
+            last_tick_id = tick.id;
 
             acc_spread[sym].update(tick.raw_spread);
             acc_ofi[sym].update(tick.raw_ofi);
@@ -203,7 +223,6 @@ void execution_consumer(torch::jit::script::Module& module,
             c10::IValue output = module.forward({input_tensor});
             torch::Tensor logits = output.toTensor();
             torch::Tensor probs = torch::softmax(logits, 1);
-            auto max_prob_result = probs.max(1);
 
             // Extract raw class probabilities
             float prob_sell = probs[0][0].item<float>();
@@ -212,26 +231,24 @@ void execution_consumer(torch::jit::script::Module& module,
 
             int action = 1; // Default to HOLD
 
+            // The model is trained with class weights, so its probabilities hover near 1/3.
+            // Require the directional class to win outright and beat the opposite side by a margin.
+            bool cooled_down = !last_trade_tick.contains(sym) ||
+                               tick.id - last_trade_tick[sym] > COOLDOWN_TICKS;
+
             // 1. High-Conviction LONG Signal
-            if (prob_buy > prob_hold && prob_buy > prob_sell) {
-                if ((prob_buy - prob_sell) >= 0.15f && prob_buy >= 0.45f) {
-                    if (tick.id - last_trade_tick[sym] > COOLDOWN_TICKS) {
-                        action = 2; // BUY / LONG
-                        last_trade_tick[sym] = tick.id;
-                    }
-                }
+            if (cooled_down && prob_buy > prob_hold && prob_buy > prob_sell &&
+                (prob_buy - prob_sell) >= SIGNAL_MARGIN && prob_buy >= MIN_SIGNAL_PROB) {
+                action = 2; // BUY / LONG
+                last_trade_tick[sym] = tick.id;
             }
             // 2. High-Conviction SHORT Signal
-            else if (prob_sell > prob_hold && prob_sell > prob_buy) {
-                if ((prob_sell - prob_buy) >= 0.15f && prob_sell >= 0.45f) {
-                    if (tick.id - last_trade_tick[sym] > COOLDOWN_TICKS) {
-                        action = 0; // SELL / SHORT
-                        last_trade_tick[sym] = tick.id;
-                    }
-                }
+            else if (cooled_down && prob_sell > prob_hold && prob_sell > prob_buy &&
+                     (prob_sell - prob_buy) >= SIGNAL_MARGIN && prob_sell >= MIN_SIGNAL_PROB) {
+                action = 0; // SELL / SHORT
+                last_trade_tick[sym] = tick.id;
             }
 
-            // CALL THIS EXACTLY ONCE!
             portfolio.process_signal(tick.id, sym, action, tick.raw_price, tick.raw_spread);
 
             //Ticker debugger
@@ -245,14 +262,15 @@ void execution_consumer(torch::jit::script::Module& module,
             }
 
             auto end = std::chrono::high_resolution_clock::now();
-
-            portfolio.process_signal(tick.id, sym, action, tick.raw_price, tick.raw_spread);
             double latency = std::chrono::duration<double, std::micro>(end - start).count();
             latencies_us.push_back(latency);
+        } else if (producer_done) {
+            break;
         } else {
             _mm_pause();
         }
     }
+    portfolio.liquidate_all(last_tick_id);
 }
 
 int main() {
@@ -316,6 +334,7 @@ int main() {
     std::cout << "Ending Equity:         $" << portfolio.get_total_equity() << " USD" << std::endl;
     std::cout << "Total Net PnL:         $" << portfolio.get_pnl() << " USD (" 
               << (portfolio.get_pnl() / 10000.0) * 100.0 << "%)" << std::endl;
+    std::cout << "Total Round Trips:     " << portfolio.get_total_trades() << std::endl;
     std::cout << "Win Rate:              " << portfolio.get_win_rate() << " %" << std::endl;
     std::cout << "Max Drawdown:          " << portfolio.get_max_drawdown() << " %" << std::endl;
     std::cout << "Sharpe Ratio:          " << portfolio.calculate_sharpe_ratio() << std::endl;

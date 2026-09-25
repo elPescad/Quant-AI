@@ -30,6 +30,10 @@ private:
     double initial_stop_loss_pct_;
     double trailing_stop_pct_;    
 
+    double max_gross_leverage_;   // Cap on sum(|position value|) / equity
+    double max_spread_cost_pct_;  // Cap on the half-spread we assume we pay per fill
+    double max_raw_spread_pct_;   // Skip entries when the quoted spread looks broken
+
     std::unordered_map<std::string, Position> positions_;
 
     double peak_equity_;
@@ -46,7 +50,10 @@ public:
                     double max_alloc_pct = 0.15,
                     double tp_pct = 0.0150,     // 1.50% Take Profit
                     double sl_pct = 0.0050,     // 0.50% Stop Loss (2:1 Ratio)
-                    double trail_pct = 0.0045)  // 0.45% Trailing
+                    double trail_pct = 0.0045,  // 0.45% Trailing
+                    double max_gross_leverage = 1.0,
+                    double max_spread_cost_pct = 0.0005, // 5 bps max fill spread
+                    double max_raw_spread_pct = 0.01)    // 1% spread = bad data
         : cash_balance_(starting_cash),
           initial_capital_(starting_cash),
           fee_rate_(fee_rate),
@@ -54,6 +61,9 @@ public:
           take_profit_pct_(tp_pct),
           initial_stop_loss_pct_(sl_pct),
           trailing_stop_pct_(trail_pct),
+          max_gross_leverage_(max_gross_leverage),
+          max_spread_cost_pct_(max_spread_cost_pct),
+          max_raw_spread_pct_(max_raw_spread_pct),
           peak_equity_(starting_cash),
           max_drawdown_(0.0),
           total_trades_(0),
@@ -73,12 +83,81 @@ public:
     }
 
     void process_signal(int tick_id, const std::string& ticker, int action, float raw_price, float raw_spread) {
+        // Reject malformed ticks (wrong CSV schema, NaNs, zero prices) before they can
+        // turn into absurd position sizes like $1500 / $0.01 = 150,000 units.
+        if (!std::isfinite(raw_price) || raw_price <= 0.0f ||
+            !std::isfinite(raw_spread) || raw_spread < 0.0f) {
+            return;
+        }
+
         Position& pos = positions_[ticker];
         pos.current_mid_price = static_cast<double>(raw_price);
-        double half_spread = static_cast<double>(raw_spread) * 0.5;
+
+        // raw_spread from 5-minute bars is the high-low range, not a bid-ask spread.
+        // Charging half the bar range on every fill makes every trade a loser, so cap it.
+        double spread_relative = static_cast<double>(raw_spread) / pos.current_mid_price;
+        double half_spread = 0.5 * pos.current_mid_price * std::min(spread_relative, max_spread_cost_pct_);
 
         double current_equity = get_total_equity();
         if (current_equity <= 0.0) return;
+
+        manage_position(tick_id, ticker, pos, action, half_spread, spread_relative);
+
+        // ====================================================================
+        // 3. METRIC TRACKING (runs on every tick, including stop-outs)
+        // ====================================================================
+        current_equity = get_total_equity();
+        equity_curve_.push_back(current_equity);
+
+        if (current_equity > peak_equity_) {
+            peak_equity_ = current_equity;
+        } else if (peak_equity_ > 0.0) {
+            double drawdown = (peak_equity_ - current_equity) / peak_equity_;
+            if (drawdown > max_drawdown_) max_drawdown_ = drawdown;
+        }
+    }
+
+    // Close every open position at the last seen mid +/- capped half spread
+    void liquidate_all(int tick_id) {
+        for (auto& [ticker, pos] : positions_) {
+            double half_spread = 0.5 * pos.current_mid_price * max_spread_cost_pct_;
+            if (pos.units > 0.0001) {
+                execute_sell(tick_id, ticker, pos, pos.current_mid_price - half_spread, "END_OF_DATA_SELL");
+            } else if (pos.units < -0.0001) {
+                execute_cover(tick_id, ticker, pos, pos.current_mid_price + half_spread, "END_OF_DATA_COVER");
+            }
+        }
+    }
+
+private:
+    double get_gross_exposure() const {
+        double gross = 0.0;
+        for (const auto& [ticker, pos] : positions_) {
+            gross += std::abs(pos.units * pos.current_mid_price);
+        }
+        return gross;
+    }
+
+    // How many dollars a new position may use without breaching cash or leverage limits
+    double available_trade_usd(double current_equity) const {
+        double target_trade_usd = current_equity * max_allocation_pct_;
+        double exposure_room = current_equity * max_gross_leverage_ - get_gross_exposure();
+        // Short proceeds sit in cash_balance_ but are owed back, so they are not buying power
+        double free_cash = cash_balance_ - get_short_liability();
+        double max_spendable_cash = std::max(0.0, free_cash) / (1.0 + fee_rate_);
+        return std::max(0.0, std::min({target_trade_usd, exposure_room, max_spendable_cash}));
+    }
+
+    double get_short_liability() const {
+        double liability = 0.0;
+        for (const auto& [ticker, pos] : positions_) {
+            if (pos.units < 0.0) liability += -pos.units * pos.current_mid_price;
+        }
+        return liability;
+    }
+
+    void manage_position(int tick_id, const std::string& ticker, Position& pos, int action,
+                         double half_spread, double spread_relative) {
 
         // ====================================================================
         // 1. RISK MANAGEMENT: Trailing Stop & Take Profit Checks (Long & Short)
@@ -136,14 +215,10 @@ public:
         // ====================================================================
         // 2. MODEL SIGNAL EXECUTION WITH SPREAD-HURDLE FILTER
         // ====================================================================
-        double spread_relative = static_cast<double>(raw_spread) / pos.current_mid_price;
-
-        // Block entry if bid-ask spread friction exceeds 0.25% of share price
-        if (spread_relative > 0.0025 && std::abs(pos.units) < 0.0001) {
+        // Block new entries only when the quoted spread looks like bad data
+        if (spread_relative > max_raw_spread_pct_ && std::abs(pos.units) < 0.0001) {
             return;
         }
-
-        double target_trade_usd = current_equity * max_allocation_pct_;
 
         if (action == 2) { // SIGNAL: BUY / LONG
             double buy_fill_price = pos.current_mid_price + half_spread; // Pay Ask
@@ -153,8 +228,7 @@ public:
             }
             
             if (std::abs(pos.units) < 0.0001) { // Flat, open LONG
-                double max_spendable_cash = cash_balance_ / (1.0 + fee_rate_);
-                double actual_trade_usd = std::min(target_trade_usd, max_spendable_cash);
+                double actual_trade_usd = available_trade_usd(get_total_equity());
 
                 if (actual_trade_usd >= 10.0) {
                     double fee = actual_trade_usd * fee_rate_;
@@ -178,9 +252,7 @@ public:
             }
 
             if (std::abs(pos.units) < 0.0001) { // Flat, open SHORT
-                // Using cash_balance_ as a proxy for margin available
-                double max_spendable_cash = cash_balance_ / (1.0 + fee_rate_);
-                double actual_trade_usd = std::min(target_trade_usd, max_spendable_cash);
+                double actual_trade_usd = available_trade_usd(get_total_equity());
 
                 if (actual_trade_usd >= 10.0) {
                     double fee = actual_trade_usd * fee_rate_;
@@ -197,21 +269,9 @@ public:
                 }
             }
         }
-
-        // ====================================================================
-        // 3. METRIC TRACKING
-        // ====================================================================
-        current_equity = get_total_equity();
-        equity_curve_.push_back(current_equity);
-
-        if (current_equity > peak_equity_) {
-            peak_equity_ = current_equity;
-        } else if (peak_equity_ > 0.0) {
-            double drawdown = (peak_equity_ - current_equity) / peak_equity_;
-            if (drawdown > max_drawdown_) max_drawdown_ = drawdown;
-        }
     }
 
+public:
     double get_total_equity() const {
         double position_value = 0.0;
         for (const auto& [ticker, pos] : positions_) {
@@ -224,6 +284,7 @@ public:
 
     double get_pnl() const { return get_total_equity() - initial_capital_; }
     double get_max_drawdown() const { return max_drawdown_ * 100.0; }
+    int get_total_trades() const { return total_trades_; }
 
     double get_win_rate() const {
         if (total_trades_ == 0) return 0.0;
@@ -250,7 +311,8 @@ public:
         double stdev = std::sqrt(sq_sum / returns.size());
 
         if (stdev == 0.0) return 0.0;
-        return (mean / stdev) * std::sqrt(252.0 * 390.0);
+        // Data is 5-minute bars: 78 bars per 6.5h trading day
+        return (mean / stdev) * std::sqrt(252.0 * 78.0);
     }
 
 private:
