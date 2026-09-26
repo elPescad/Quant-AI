@@ -128,14 +128,18 @@ void file_stream_producer(const std::string& csv_file) {
             std::getline(ss, v, ',')) {
 
             MarketTick tick;
+            try {
+                tick.raw_price = std::stof(p);
+                tick.raw_spread = std::stof(s);
+                tick.raw_ofi = std::stof(o);
+                tick.raw_delta = std::stof(d);
+                tick.raw_vol = std::stof(v);
+            } catch (const std::exception&) {
+                continue; // Skip malformed rows (empty / NaN fields)
+            }
             tick.id = tick_id++;
             std::strncpy(tick.ticker, sym.c_str(), sizeof(tick.ticker) - 1);
             tick.ticker[sizeof(tick.ticker) - 1] = '\0';
-            tick.raw_price = std::stof(p);
-            tick.raw_spread = std::stof(s);
-            tick.raw_ofi = std::stof(o);
-            tick.raw_delta = std::stof(d);
-            tick.raw_vol = std::stof(v);
 
             while (!event_queue.push(tick)) [[unlikely]] {
                 _mm_pause();
@@ -162,12 +166,13 @@ void execution_consumer(torch::jit::script::Module& module,
 
     while (true) {
         auto popped = event_queue.pop();
-        
+
         if (popped.has_value()) [[likely]] {
             auto start = std::chrono::high_resolution_clock::now();
 
             MarketTick tick = popped.value();
             std::string sym(tick.ticker);
+            last_tick_id = tick.id;
 
             float n_spread = acc_spread[sym].normalize_and_update(tick.raw_spread);
             float n_ofi    = acc_ofi[sym].normalize_and_update(tick.raw_ofi);
@@ -233,6 +238,7 @@ void execution_consumer(torch::jit::script::Module& module,
             _mm_pause();
         }
     }
+    portfolio.liquidate_all(last_tick_id);
 }
 
 int main() {
@@ -296,6 +302,7 @@ int main() {
     std::cout << "Ending Equity:         $" << portfolio.get_total_equity() << " USD" << std::endl;
     std::cout << "Total Net PnL:         $" << portfolio.get_pnl() << " USD (" 
               << (portfolio.get_pnl() / 10000.0) * 100.0 << "%)" << std::endl;
+    std::cout << "Total Round Trips:     " << portfolio.get_total_trades() << std::endl;
     std::cout << "Win Rate:              " << portfolio.get_win_rate() << " %" << std::endl;
     std::cout << "Max Drawdown:          " << portfolio.get_max_drawdown() << " %" << std::endl;
     std::cout << "Sharpe Ratio:          " << portfolio.calculate_sharpe_ratio() << std::endl;
