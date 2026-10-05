@@ -33,7 +33,7 @@ def backtest(engine, data, model, allocator, period, workdir):
     out = subprocess.run(cmd, capture_output=True, text=True)
     (workdir / f"bt_{tag}.log").write_text(out.stdout + out.stderr)
     if out.returncode != 0:
-        sys.exit(f"[-] {' '.join(cmd)} failed:\n{out.stderr[-2000:]}")
+        sys.exit(f"[-] {' '.join(cmd)} failed (full log: {workdir / f'bt_{tag}.log'}):\n{out.stderr[:1500]}")
     row = {}
     for key, pat in METRICS.items():
         m = re.search(pat, out.stdout)
