@@ -1,312 +1,494 @@
-#include <torch/torch.h>
+// Low-latency quant paper-trading engine.
+//
+//   producer thread : CSV -> MarketTick -> SPSC ring buffer
+//   consumer thread : per-ticker features (EWMA z-scores, RLS AR(1), simulated ZZ quantum
+//                     feature map) -> TorchScript GRU -> per-bar QUBO allocation solved by
+//                     simulated annealing -> portfolio rebalance + per-tick risk exits
+//
+// By default only the held-out test period (from the model's config) is traded; the
+// earlier data is streamed through to warm up the feature state.
+
 #include <torch/script.h>
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <vector>
-#include <chrono>
-#include <numeric>
+#include <torch/torch.h>
+
 #include <algorithm>
-#include <thread>
 #include <atomic>
-#include <cmath>
-#include <unordered_map>
+#include <chrono>
+#include <climits>
 #include <cstring>
-#include <emmintrin.h>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <numeric>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+#ifdef __linux__
 #include <pthread.h>
-#include "ring_buffer.hpp"
+#endif
+
+#include "feature_pipeline.hpp"
+#include "market_data.hpp"
 #include "portfolio.hpp"
+#include "qubo_allocator.hpp"
+#include "ring_buffer.hpp"
 
-constexpr int SEQ_LEN = 30;
+namespace {
 
-struct MarketTick {
-    int id;
-    char ticker[8];
-    float raw_price;
-    float raw_spread;
-    float raw_ofi;
-    float raw_delta;
-    float raw_vol;
+constexpr int COOLDOWN_BARS = 6; // No re-entry for this many bars after a risk exit
+
+struct EngineOptions {
+    std::string data_path = "../data/market_ticks.csv";
+    std::string model_path = "../models/quant_model.pt";
+    std::string config_path; // Defaults to <model>_config.txt
+    std::string trades_path = "trades.csv";
+    std::string allocator = "qubo"; // qubo | greedy
+    std::string period = "test";    // test | val | all
+    int64_t start_ts = INT64_MIN;
+    int64_t end_ts = INT64_MAX;
+    int max_positions = 4;
+    double risk_aversion = 100.0;
+    bool verify_qubo = false;
+    bool verbose = false;
 };
 
-class EWMStandardizer {
-private:
-    double alpha;
-    double mean = 0.0;
-    double variance = 0.0;
-    bool initialized = false;
-    uint64_t count = 0;
+void usage() {
+    std::cout << "Usage: quant_engine [options]\n"
+                 "  --data PATH            market ticks CSV (default ../data/market_ticks.csv)\n"
+                 "  --model PATH           TorchScript model (default ../models/quant_model.pt)\n"
+                 "  --config PATH          feature config (default <model>_config.txt)\n"
+                 "  --period test|val|all  which split to trade (default test = out-of-sample)\n"
+                 "  --start-ts T --end-ts T  explicit trading window (unix seconds)\n"
+                 "  --allocator qubo|greedy  position selection (default qubo)\n"
+                 "  --risk-aversion X      QUBO risk aversion gamma (default 100)\n"
+                 "  --max-positions K      max simultaneous positions (default 4)\n"
+                 "  --verify-qubo          check every SA solution against brute force\n"
+                 "  --trades PATH          trade log (default trades.csv)\n"
+                 "  --verbose              per-bar debug output\n";
+}
 
-public:
-    EWMStandardizer(int span = 500) {
-        alpha = 2.0 / (span + 1.0); 
+bool parse_args(int argc, char** argv, EngineOptions& o) {
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        auto next = [&]() -> std::string {
+            if (i + 1 >= argc) throw std::runtime_error("Missing value for " + a);
+            return argv[++i];
+        };
+        if (a == "--data") o.data_path = next();
+        else if (a == "--model") o.model_path = next();
+        else if (a == "--config") o.config_path = next();
+        else if (a == "--trades") o.trades_path = next();
+        else if (a == "--allocator") o.allocator = next();
+        else if (a == "--period") o.period = next();
+        else if (a == "--start-ts") o.start_ts = std::stoll(next());
+        else if (a == "--end-ts") o.end_ts = std::stoll(next());
+        else if (a == "--max-positions") o.max_positions = std::stoi(next());
+        else if (a == "--risk-aversion") o.risk_aversion = std::stod(next());
+        else if (a == "--verify-qubo") o.verify_qubo = true;
+        else if (a == "--verbose") o.verbose = true;
+        else if (a == "--help" || a == "-h") { usage(); return false; }
+        else throw std::runtime_error("Unknown option " + a);
     }
-
-    float normalize_and_update(double x) {
-        count++;
-        if (!initialized) {
-            mean = x;
-            variance = 0.0;
-            initialized = true;
-            return 0.0f;
-        }
-
-        double delta = x - mean;
-        mean += alpha * delta;
-        variance = (1.0 - alpha) * (variance + alpha * delta * delta);
-        
-        double stddev = std::sqrt(variance);
-        float z = 0.0f;
-        if (stddev > 1e-6 && count >= 10) {
-            z = static_cast<float>(std::clamp((x - mean) / stddev, -4.0, 4.0));
-        }
-
-        return z;
+    if (o.config_path.empty()) {
+        std::string base = o.model_path;
+        if (base.size() > 3 && base.substr(base.size() - 3) == ".pt") base = base.substr(0, base.size() - 3);
+        o.config_path = base + "_config.txt";
     }
-
-    uint64_t get_count() const { return count; }
-};
-
-struct RollingWindow {
-    float data[SEQ_LEN * 4] = {0.0f};
-    int head = 0;
-    int count = 0;
-
-    void push(float f1, float f2, float f3, float f4) {
-        int base = head * 4;
-        data[base]   = f1;
-        data[base+1] = f2;
-        data[base+2] = f3;
-        data[base+3] = f4;
-        
-        head = (head + 1) % SEQ_LEN;
-        if (count < SEQ_LEN) count++;
-    }
-
-    void fill_tensor(float* tensor_data) const {
-        int idx = (count < SEQ_LEN) ? 0 : head;
-        for (int i = 0; i < count; i++) {
-            int base_src = idx * 4;
-            int base_dst = i * 4;
-            std::memcpy(tensor_data + base_dst, data + base_src, 4 * sizeof(float));
-            idx = (idx + 1) % SEQ_LEN;
-        }
-    }
-};
+    if (o.allocator != "qubo" && o.allocator != "greedy") throw std::runtime_error("--allocator must be qubo or greedy");
+    return true;
+}
 
 LockFreeRingBuffer<MarketTick, 8192> event_queue;
 std::atomic<bool> stream_finished(false);
+std::atomic<bool> stop_requested(false);
+std::atomic<long> rows_skipped(0);
 
 void pin_thread_to_core(std::thread& th, int core_id) {
+#ifdef __linux__
+    if (core_id >= static_cast<int>(std::thread::hardware_concurrency())) return;
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(core_id, &cpuset);
     pthread_setaffinity_np(th.native_handle(), sizeof(cpu_set_t), &cpuset);
+#else
+    (void)th;
+    (void)core_id;
+#endif
 }
 
 void file_stream_producer(const std::string& csv_file) {
     std::ifstream file(csv_file);
     if (!file.is_open()) {
         std::cerr << "[-] Error opening market data file: " << csv_file << std::endl;
-        stream_finished = true;
+        stream_finished.store(true, std::memory_order_release);
         return;
     }
 
     std::string line;
     std::getline(file, line);
+    if (!is_tick_csv_header(line)) {
+        std::cerr << "[-] Unexpected CSV header: " << line << "\n"
+                  << "    Expected: " << kTickCsvHeader << "\n"
+                  << "    Regenerate data with python/fetch_real_ticks.py or python/generate_ticks.py" << std::endl;
+        stream_finished.store(true, std::memory_order_release);
+        return;
+    }
 
     int tick_id = 0;
-    while (std::getline(file, line)) {
-        std::stringstream ss(line);
-        std::string sym, p, s, o, d, v;
-
-        if (std::getline(ss, sym, ',') &&
-            std::getline(ss, p, ',') &&
-            std::getline(ss, s, ',') &&
-            std::getline(ss, o, ',') &&
-            std::getline(ss, d, ',') &&
-            std::getline(ss, v, ',')) {
-
-            MarketTick tick;
-            try {
-                tick.raw_price = std::stof(p);
-                tick.raw_spread = std::stof(s);
-                tick.raw_ofi = std::stof(o);
-                tick.raw_delta = std::stof(d);
-                tick.raw_vol = std::stof(v);
-            } catch (const std::exception&) {
-                continue; // Skip malformed rows (empty / NaN fields)
-            }
-            tick.id = tick_id++;
-            std::strncpy(tick.ticker, sym.c_str(), sizeof(tick.ticker) - 1);
-            tick.ticker[sizeof(tick.ticker) - 1] = '\0';
-
-            while (!event_queue.push(tick)) [[unlikely]] {
-                _mm_pause();
-            }
+    while (std::getline(file, line) && !stop_requested.load(std::memory_order_relaxed)) {
+        MarketTick tick;
+        if (!parse_tick_row(line, tick)) {
+            rows_skipped.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        tick.id = tick_id++;
+        while (!event_queue.push(tick)) [[unlikely]] {
+            cpu_relax();
         }
     }
-    stream_finished = true;
+    stream_finished.store(true, std::memory_order_release);
 }
 
-void execution_consumer(torch::jit::script::Module& module, 
-                        std::vector<double>& latencies_us,
-                        PortfolioManager& portfolio) {
-    torch::InferenceMode guard;
-    latencies_us.reserve(500000);
+struct TickerState {
+    explicit TickerState(const FeatureConfig& cfg, int asset_idx)
+        : pipeline(cfg), moves(cfg.label_horizon), asset(asset_idx) {}
 
-    std::unordered_map<std::string, EWMStandardizer> acc_spread, acc_ofi, acc_delta, acc_vol;
-    std::unordered_map<std::string, RollingWindow> ticker_memory;
+    TickerFeaturePipeline pipeline;
+    HorizonMoveTracker moves;
+    int asset;
+    double edge = 0.0;      // p_buy - p_sell from the latest model call
+    long signal_bar = -1;   // Bar index of that call
+    long cooldown_until = -1;
+    double last_price = 0.0;
+    double prev_bar_price = 0.0;
+    bool seen_this_bar = false;
+};
 
-    torch::Tensor input_tensor = torch::zeros({1, SEQ_LEN, 4}, torch::kFloat32);
-    float* raw_data = input_tensor.data_ptr<float>();
+struct EngineStats {
+    std::vector<double> feature_us; // Feature pipeline incl. quantum circuit simulation
+    std::vector<double> model_us;   // GRU forward
+    std::vector<double> alloc_us;   // QUBO build + anneal per bar
+    long bars = 0;
+    long trading_bars = 0;
+    long ticks = 0;
+};
 
-    std::unordered_map<std::string, int> last_trade_tick;
-    const int COOLDOWN_TICKS = 100;
+class Engine {
+public:
+    Engine(const EngineOptions& opt, const FeatureConfig& cfg, torch::jit::script::Module& model)
+        : opt_(opt), cfg_(cfg), model_(model),
+          portfolio_(make_portfolio_params(opt)),
+          risk_(0.99),
+          allocator_(make_alloc_params(opt, cfg), risk_),
+          input_(torch::zeros({1, cfg.seq_len, cfg.input_dim()}, torch::kFloat32)) {}
 
-    while (true) {
-        auto popped = event_queue.pop();
-
-        if (popped.has_value()) [[likely]] {
-            auto start = std::chrono::high_resolution_clock::now();
-
-            MarketTick tick = popped.value();
-            std::string sym(tick.ticker);
-            last_tick_id = tick.id;
-
-            float n_spread = acc_spread[sym].normalize_and_update(tick.raw_spread);
-            float n_ofi    = acc_ofi[sym].normalize_and_update(tick.raw_ofi);
-            float n_delta  = acc_delta[sym].normalize_and_update(tick.raw_delta);
-            float n_vol    = acc_vol[sym].normalize_and_update(tick.raw_vol);
-
-            ticker_memory[sym].push(n_spread, n_ofi, n_delta, n_vol);
-
-            if (acc_spread[sym].get_count() < 30 || ticker_memory[sym].count < SEQ_LEN) {
-                portfolio.process_signal(tick.id, sym, 1, tick.raw_price, tick.raw_spread);
-                continue;
+    void run() {
+        torch::InferenceMode guard;
+        MarketTick tick;
+        while (true) {
+            // Read the flag BEFORE popping: if the producer had already finished and the
+            // queue is still empty, every tick has been consumed.
+            const bool producer_done = stream_finished.load(std::memory_order_acquire);
+            if (event_queue.try_pop(tick)) [[likely]] {
+                if (!done_trading_) on_tick(tick);
+            } else if (producer_done) {
+                break;
+            } else {
+                cpu_relax();
             }
+        }
+        if (!done_trading_) {
+            if (bar_ts_ != INT64_MIN) close_bar();
+            portfolio_.liquidate_all(last_tick_id_);
+        }
+    }
 
-            ticker_memory[sym].fill_tensor(raw_data);
+    void report(double wall_sec) const {
+        auto pct = [](std::vector<double> v, double q) {
+            if (v.empty()) return 0.0;
+            std::sort(v.begin(), v.end());
+            return v[std::min(v.size() - 1, static_cast<size_t>(q * v.size()))];
+        };
+        auto mean = [](const std::vector<double>& v) {
+            return v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size();
+        };
 
-            c10::IValue output = module.forward({input_tensor});
-            torch::Tensor logits = output.toTensor();
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "\n==================================================\n"
+                  << "          SYSTEM & HARDWARE BENCHMARKS\n"
+                  << "==================================================\n"
+                  << "Ticks Processed:       " << stats_.ticks << " (" << stats_.bars << " bars, "
+                  << stats_.trading_bars << " traded)\n"
+                  << "Feature+Quantum Sim:   avg " << mean(stats_.feature_us) << " us | p99 " << pct(stats_.feature_us, 0.99) << " us\n"
+                  << "GRU Forward:           avg " << mean(stats_.model_us) << " us | p99 " << pct(stats_.model_us, 0.99) << " us\n"
+                  << "QUBO Allocation/bar:   avg " << mean(stats_.alloc_us) << " us | p99 " << pct(stats_.alloc_us, 0.99) << " us\n"
+                  << "Throughput:            " << static_cast<long>(stats_.ticks / std::max(wall_sec, 1e-9)) << " ticks/sec\n";
+
+        if (opt_.allocator == "qubo") {
+            const auto& s = allocator_.stats();
+            std::cout << "QUBO Solves:           " << s.solves << " (avg "
+                      << (s.solves ? static_cast<double>(s.variables_total) / s.solves : 0.0) << " binary vars)\n";
+            if (s.verified > 0) {
+                std::cout << "SA == Brute Force:     " << s.matched_optimum << "/" << s.verified << " ("
+                          << 100.0 * s.matched_optimum / s.verified << "%), max energy gap "
+                          << std::setprecision(6) << s.max_energy_gap << std::setprecision(2) << "\n";
+            }
+        }
+
+        std::cout << "\n==================================================\n"
+                  << "     AR(1) ORDER-FLOW PERSISTENCE (RLS estimate)\n"
+                  << "==================================================\n";
+        for (const auto& name : asset_names_) {
+            const auto& ar = states_.at(name)->pipeline.ar();
+            std::cout << std::left << std::setw(6) << name << std::right << " phi = " << std::setprecision(3) << ar.phi()
+                      << " +/- " << ar.phi_stderr() << "  half-life " << std::setprecision(1) << ar.half_life() << " bars\n";
+        }
+
+        std::cout << std::setprecision(2)
+                  << "\n==================================================\n"
+                  << "        PAPER TRADING PORTFOLIO RESULTS\n"
+                  << "==================================================\n"
+                  << "Model:                 " << opt_.model_path << " (quantum_lift=" << cfg_.quantum_lift
+                  << ", input_dim=" << cfg_.input_dim() << ")\n"
+                  << "Allocator:             " << opt_.allocator;
+        if (opt_.allocator == "qubo") std::cout << " (gamma=" << opt_.risk_aversion << ", K=" << opt_.max_positions << ")";
+        std::cout << "\nPeriod:                " << opt_.period << " ["
+                  << (trade_start_ == INT64_MIN ? std::string("start") : std::to_string(trade_start_)) << ", "
+                  << (trade_end_ == INT64_MAX ? std::string("end") : std::to_string(trade_end_)) << ")\n"
+                  << "Starting Equity:       $10000.00\n"
+                  << "Ending Equity:         $" << portfolio_.get_total_equity() << "\n"
+                  << "Total Net PnL:         $" << portfolio_.get_pnl() << " (" << portfolio_.get_return_pct() << "%)\n"
+                  << "Fees Paid:             $" << portfolio_.get_fees_paid() << "\n"
+                  << "Total Round Trips:     " << portfolio_.get_total_trades() << " (" << portfolio_.get_risk_exits()
+                  << " stop/take-profit exits)\n"
+                  << "Win Rate:              " << portfolio_.get_win_rate() << " %\n"
+                  << "Avg Gross Exposure:    " << portfolio_.get_avg_gross_exposure() << " % of equity\n"
+                  << "Max Drawdown:          " << portfolio_.get_max_drawdown() << " %\n"
+                  << "Sharpe Ratio (ann.):   " << portfolio_.calculate_sharpe_ratio() << "\n"
+                  << "==================================================\n";
+        if (rows_skipped.load() > 0) std::cout << "[!] Skipped " << rows_skipped.load() << " malformed CSV rows\n";
+    }
+
+    void set_window(int64_t start, int64_t end) {
+        trade_start_ = start;
+        trade_end_ = end;
+    }
+
+private:
+    static PortfolioParams make_portfolio_params(const EngineOptions& o) {
+        PortfolioParams p;
+        p.trade_log = o.trades_path;
+        p.position_weight = 1.0 / std::max(1, o.max_positions);
+        return p;
+    }
+
+    static AllocatorParams make_alloc_params(const EngineOptions& o, const FeatureConfig& cfg) {
+        AllocatorParams a;
+        a.max_positions = o.max_positions;
+        a.risk_aversion = o.risk_aversion;
+        a.position_weight = 1.0 / std::max(1, o.max_positions);
+        a.horizon = cfg.label_horizon;
+        a.verify_with_brute_force = o.verify_qubo;
+        return a;
+    }
+
+    bool trading_now() const { return bar_ts_ >= trade_start_ && bar_ts_ < trade_end_; }
+
+    TickerState& state_for(const std::string& sym) {
+        auto it = states_.find(sym);
+        if (it != states_.end()) return *it->second;
+        int idx = risk_.add_asset();
+        asset_names_.push_back(sym);
+        auto [ins, ok] = states_.emplace(sym, std::make_unique<TickerState>(cfg_, idx));
+        return *ins->second;
+    }
+
+    void on_tick(const MarketTick& tick) {
+        if (tick.timestamp != bar_ts_) {
+            if (bar_ts_ != INT64_MIN) close_bar();
+            if (tick.timestamp >= trade_end_) {
+                // Past the trading window: flatten and stop the producer early
+                portfolio_.liquidate_all(last_tick_id_);
+                done_trading_ = true;
+                stop_requested.store(true, std::memory_order_relaxed);
+                return;
+            }
+            bar_ts_ = tick.timestamp;
+            bar_index_++;
+            stats_.bars++;
+        }
+
+        stats_.ticks++;
+        last_tick_id_ = tick.id;
+        const std::string sym(tick.ticker);
+        TickerState& st = state_for(sym);
+
+        auto t0 = std::chrono::steady_clock::now();
+        const bool ready = st.pipeline.update(tick);
+        auto t1 = std::chrono::steady_clock::now();
+        stats_.feature_us.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+
+        st.last_price = tick.raw_price;
+        st.seen_this_bar = true;
+
+        if (portfolio_.mark(tick.id, sym, tick.raw_price, tick.raw_spread)) {
+            st.cooldown_until = bar_index_ + COOLDOWN_BARS;
+        }
+
+        if (ready && trading_now()) {
+            st.pipeline.copy_window(input_.data_ptr<float>());
+            auto t2 = std::chrono::steady_clock::now();
+            torch::Tensor logits = model_.forward({input_}).toTensor();
             torch::Tensor probs = torch::softmax(logits, 1);
+            auto t3 = std::chrono::steady_clock::now();
+            stats_.model_us.push_back(std::chrono::duration<double, std::micro>(t3 - t2).count());
 
-            const float* p_ptr = probs.data_ptr<float>();
-            float prob_sell = p_ptr[0];
-            float prob_hold = p_ptr[1];
-            float prob_buy  = p_ptr[2];
-
-            // 1. Confidence-Gated Model Decision
-            constexpr float MIN_CONFIDENCE = 0.52f;
-            int model_action = 1; // Default HOLD
-
-            if (prob_sell >= MIN_CONFIDENCE && prob_sell > prob_hold && prob_sell > prob_buy) {
-                model_action = 0; // SELL
-            } else if (prob_buy >= MIN_CONFIDENCE && prob_buy > prob_hold && prob_buy > prob_sell) {
-                model_action = 2; // BUY
-            }
-
-            // 2. Cooldown Execution Check
-            int executed_action = 1; // Default HOLD
-            if (model_action != 1) {
-                if (tick.id - last_trade_tick[sym] > COOLDOWN_TICKS) {
-                    executed_action = model_action;
-                    last_trade_tick[sym] = tick.id;
-                }
-            }
-
-            portfolio.process_signal(tick.id, sym, executed_action, tick.raw_price, tick.raw_spread);
-
-            if (tick.id % 1000 == 0) {
-                std::cout << "[DEBUG] Tick " << tick.id 
-                        << " | Ticker: " << sym 
-                        << " | Action: " << executed_action 
-                        << " (Raw: " << model_action << ")"
-                        << " | Probs: " << prob_sell << ", " 
-                        << prob_hold << ", " 
-                        << prob_buy << "\n";
-            }
-
-            auto end = std::chrono::high_resolution_clock::now();
-            double latency = std::chrono::duration<double, std::micro>(end - start).count();
-            latencies_us.push_back(latency);
-
-        } else if (stream_finished.load()) {
-            break;
-        } else {
-            _mm_pause();
+            const float* p = probs.data_ptr<float>();
+            st.edge = static_cast<double>(p[2]) - static_cast<double>(p[0]);
+            st.signal_bar = bar_index_;
         }
     }
-    portfolio.liquidate_all(last_tick_id);
-}
 
-int main() {
-    std::cout << "=== Low-Latency Quant ML Paper Trading Engine ===" << std::endl;
+    void close_bar() {
+        // 1. Risk model: 1-bar returns of every ticker that printed in this bar
+        const int n = risk_.size();
+        std::vector<double> rets(n, 0.0);
+        std::vector<uint8_t> valid(n, 0);
+        for (const auto& name : asset_names_) {
+            TickerState& st = *states_[name];
+            if (!st.seen_this_bar) continue;
+            if (st.prev_bar_price > 0.0 && st.last_price > 0.0) {
+                rets[st.asset] = st.last_price / st.prev_bar_price - 1.0;
+                valid[st.asset] = 1;
+            }
+            st.moves.on_bar_close(st.last_price);
+        }
+        risk_.update(rets, valid);
+
+        // 2. Allocation over tickers with a fresh signal
+        if (trading_now()) {
+            stats_.trading_bars++;
+            auto t0 = std::chrono::steady_clock::now();
+
+            std::vector<AssetView> views;
+            std::vector<std::string> names;
+            int held_outside = 0;
+            for (const auto& name : asset_names_) {
+                TickerState& st = *states_[name];
+                const int cur = portfolio_.direction(name);
+                const bool eligible = st.signal_bar == bar_index_ && st.moves.ready() && risk_.warm() &&
+                                      bar_index_ >= st.cooldown_until;
+                if (!eligible) {
+                    held_outside += cur != 0;
+                    continue;
+                }
+                AssetView v;
+                v.asset = st.asset;
+                v.expected_return = st.edge * st.moves.typical_move();
+                v.cost = portfolio_.one_way_cost(name);
+                v.current = cur;
+                views.push_back(v);
+                names.push_back(name);
+            }
+
+            const int capacity = opt_.max_positions - held_outside;
+            std::vector<int> dirs = (opt_.allocator == "qubo") ? allocator_.allocate(views, capacity)
+                                                               : QuboAllocator::greedy(views, capacity);
+            std::vector<std::pair<std::string, int>> targets;
+            for (size_t i = 0; i < names.size(); ++i) targets.push_back({names[i], dirs[i]});
+            portfolio_.rebalance(last_tick_id_, targets);
+
+            auto t1 = std::chrono::steady_clock::now();
+            if (!views.empty()) stats_.alloc_us.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+            portfolio_.record_equity();
+
+            if (opt_.verbose && bar_index_ % 50 == 0) {
+                std::cout << "[BAR " << bar_ts_ << "]";
+                for (size_t i = 0; i < names.size(); ++i)
+                    std::cout << " " << names[i] << ":" << dirs[i] << "(mu=" << views[i].expected_return * 1e4 << "bp)";
+                std::cout << " | equity $" << portfolio_.get_total_equity() << "\n";
+            }
+        }
+
+        for (const auto& name : asset_names_) {
+            TickerState& st = *states_[name];
+            if (st.seen_this_bar) st.prev_bar_price = st.last_price;
+            st.seen_this_bar = false;
+        }
+    }
+
+    const EngineOptions& opt_;
+    const FeatureConfig& cfg_;
+    torch::jit::script::Module& model_;
+    PortfolioManager portfolio_;
+    RiskModel risk_;
+    QuboAllocator allocator_;
+    torch::Tensor input_;
+
+    std::unordered_map<std::string, std::unique_ptr<TickerState>> states_;
+    std::vector<std::string> asset_names_;
+    int64_t bar_ts_ = INT64_MIN;
+    long bar_index_ = -1;
+    int last_tick_id_ = 0;
+    int64_t trade_start_ = INT64_MIN;
+    int64_t trade_end_ = INT64_MAX;
+    bool done_trading_ = false;
+    EngineStats stats_;
+};
+
+} // namespace
+
+int main(int argc, char** argv) {
+    std::cout << "=== Low-Latency Quantum-Inspired Quant Paper Trading Engine ===" << std::endl;
+
+    EngineOptions opt;
+    FeatureConfig cfg;
+    try {
+        if (!parse_args(argc, argv, opt)) return 0;
+        cfg = FeatureConfig::load(opt.config_path);
+    } catch (const std::exception& e) {
+        std::cerr << "[-] " << e.what() << std::endl;
+        return 1;
+    }
+
+    // Trading window: out-of-sample by default
+    int64_t start = INT64_MIN, end = INT64_MAX;
+    if (opt.period == "test") start = cfg.test_start_ts;
+    else if (opt.period == "val") { start = cfg.val_start_ts; end = cfg.test_start_ts; }
+    else if (opt.period != "all") { std::cerr << "[-] --period must be test, val or all" << std::endl; return 1; }
+    if (opt.start_ts != INT64_MIN) start = opt.start_ts;
+    if (opt.end_ts != INT64_MAX) end = opt.end_ts;
+    if (opt.period == "all") std::cout << "[!] Trading the full file: this includes the training period (in-sample)." << std::endl;
 
     at::set_num_threads(1);
-
-    std::string model_path = "../models/quant_model.pt";
-    std::string data_path = "../data/market_ticks.csv";
-
     torch::jit::script::Module module;
     try {
-        module = torch::jit::load(model_path);
+        module = torch::jit::load(opt.model_path);
         module.eval();
-        std::cout << "[+] TorchScript GRU Model Loaded." << std::endl;
     } catch (const c10::Error& e) {
         std::cerr << "[-] Error loading model: " << e.what() << std::endl;
-        return -1;
+        return 1;
     }
+    std::cout << "[+] Model " << opt.model_path << " | quantum_lift=" << cfg.quantum_lift << " (" << cfg.n_qubits
+              << " qubits, " << cfg.reps << " reps, bandwidth " << cfg.bandwidth << ") | input_dim=" << cfg.input_dim()
+              << " | seq_len=" << cfg.seq_len << std::endl;
+    std::cout << "[+] Streaming " << opt.data_path << std::endl;
 
-    std::vector<double> latencies_us;
-    PortfolioManager portfolio(10000.0, 0.0001); 
+    Engine engine(opt, cfg, module);
+    engine.set_window(start, end);
 
-    std::cout << "[+] Streaming raw multi-ticker market feed from " << data_path << std::endl;
-    auto wall_clock_start = std::chrono::high_resolution_clock::now();
-
-    std::thread producer(file_stream_producer, data_path);
-    std::thread consumer(execution_consumer, std::ref(module), std::ref(latencies_us), std::ref(portfolio));
-
+    auto wall_start = std::chrono::steady_clock::now();
+    std::thread producer(file_stream_producer, opt.data_path);
+    std::thread consumer([&engine] { engine.run(); });
     pin_thread_to_core(producer, 1);
     pin_thread_to_core(consumer, 2);
-
     producer.join();
     consumer.join();
+    double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
 
-    auto wall_clock_end = std::chrono::high_resolution_clock::now();
-    double total_wall_time_sec = std::chrono::duration<double>(wall_clock_end - wall_clock_start).count();
-    size_t total_ticks = latencies_us.size();
-
-    if (total_ticks == 0) return -1;
-
-    std::sort(latencies_us.begin(), latencies_us.end());
-    double avg_latency = std::accumulate(latencies_us.begin(), latencies_us.end(), 0.0) / total_ticks;
-    double p50 = latencies_us[static_cast<size_t>(total_ticks * 0.50)];
-    double p99 = latencies_us[static_cast<size_t>(total_ticks * 0.99)];
-    double throughput = total_ticks / total_wall_time_sec;
-
-    std::cout << "\n==================================================" << std::endl;
-    std::cout << "          SYSTEM & HARDWARE BENCHMARKS            " << std::endl;
-    std::cout << "==================================================" << std::endl;
-    std::cout << "Total Ticks Processed: " << total_ticks << std::endl;
-    std::cout << "Avg GRU Model Latency: " << avg_latency << " us" << std::endl;
-    std::cout << "p50 Latency:           " << p50 << " us" << std::endl;
-    std::cout << "p99 Latency:           " << p99 << " us" << std::endl;
-    std::cout << "Throughput:            " << static_cast<uint64_t>(throughput) << " predictions/sec" << std::endl;
-
-    std::cout << "\n==================================================" << std::endl;
-    std::cout << "        PAPER TRADING PORTFOLIO RESULTS           " << std::endl;
-    std::cout << "==================================================" << std::endl;
-    std::cout << "Starting Allocation:   $" << 10000.00 << " USD" << std::endl;
-    std::cout << "Ending Equity:         $" << portfolio.get_total_equity() << " USD" << std::endl;
-    std::cout << "Total Net PnL:         $" << portfolio.get_pnl() << " USD (" 
-              << (portfolio.get_pnl() / 10000.0) * 100.0 << "%)" << std::endl;
-    std::cout << "Total Round Trips:     " << portfolio.get_total_trades() << std::endl;
-    std::cout << "Win Rate:              " << portfolio.get_win_rate() << " %" << std::endl;
-    std::cout << "Max Drawdown:          " << portfolio.get_max_drawdown() << " %" << std::endl;
-    std::cout << "Sharpe Ratio:          " << portfolio.calculate_sharpe_ratio() << std::endl;
-    std::cout << "==================================================\n" << std::endl;
-
+    engine.report(wall);
     return 0;
 }

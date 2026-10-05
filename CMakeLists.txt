@@ -29,10 +29,24 @@ list(APPEND CMAKE_PREFIX_PATH "${TORCH_CMAKE_PREFIX}")
 
 find_package(Torch REQUIRED)
 
+# Without a build type CMake compiles with no optimisation at all
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -flto")
 
+# Trading engine: features + simulated quantum feature map + GRU + QUBO allocation
 add_executable(quant_engine src/main.cpp)
 target_link_libraries(quant_engine PRIVATE "${TORCH_LIBRARIES}")
 
+# Offline model evaluation on a data split (accuracy, confusion matrix, latency)
 add_executable(model_runner src/model_runner.cpp)
 target_link_libraries(model_runner PRIVATE "${TORCH_LIBRARIES}")
+
+# Unit tests: quantum simulator, C++/Python feature parity, AR estimator, QUBO/SA,
+# ring buffer, portfolio accounting. No libtorch needed.
+find_package(Threads REQUIRED)
+add_executable(engine_tests tests/engine_tests.cpp)
+target_link_libraries(engine_tests PRIVATE Threads::Threads)
+enable_testing()
+add_test(NAME engine_tests COMMAND engine_tests ${CMAKE_SOURCE_DIR}/tests/fixtures)
