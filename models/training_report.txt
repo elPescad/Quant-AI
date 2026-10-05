@@ -1,0 +1,8 @@
+Held-out test split (5964 samples, timestamps >= 1736940000)
+model             accuracy  macro_f1  buy/sell calls  call precision
+linear_raw           0.466     0.332          100.0%           0.466
+linear_quantum       0.466     0.332          100.0%           0.466
+gru_raw              0.476     0.322          100.0%           0.476
+gru_quantum          0.469     0.333          100.0%           0.469
+class mix (sell/hold/buy): [0.45187793 0.13061704 0.41750503]
+quantum bandwidth 0.1, TorchScript export max |diff| 0.00e+00

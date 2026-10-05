@@ -1,0 +1,13 @@
+feature_version=2
+seq_len=30
+ewma_span=500
+min_warmup=30
+ar_forgetting=0.995
+quantum_lift=1
+n_qubits=5
+reps=2
+bandwidth=0.1
+label_horizon=6
+val_start_ts=1736640000
+test_start_ts=1736940000
+input_dim=67
