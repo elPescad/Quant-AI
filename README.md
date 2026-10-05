@@ -24,8 +24,15 @@ CSV ticks ──► SPSC ring buffer ──► per-ticker features ──► sim
 ```bash
 source ~/quant-ml-engine/venv/bin/activate
 
-# 1. Data (real 5-minute bars from Yahoo, or synthetic data with a known signal)
-python python/fetch_real_ticks.py        # or: python python/generate_ticks.py
+# 1. Data: 5-minute regular-session bars, same features/labels for every source (python/bar_schema.py)
+python python/fetch_alpaca_ticks.py      # Alpaca (alpaca-py): needs APCA_API_KEY_ID / APCA_API_SECRET_KEY;
+                                         #   --days 180 (default), --feed sip|iex, --output PATH
+python python/fetch_real_ticks.py        # Yahoo: last 60 days only
+python python/generate_ticks.py          # synthetic data with a known signal
+
+# Compare all four methods (quantum/raw features x QUBO/greedy) on one dataset:
+# trains into runs/<name>/models, ranks by validation Sharpe, reports held-out test metrics
+python python/compare_methods.py --data data/alpaca_ticks.csv
 
 # 2. Train. Splits by time: 60% train / 20% validation / 20% test.
 #    Writes models/quant_model.pt + quant_model_config.txt (quantum features)
@@ -67,7 +74,7 @@ is the 6-bar-ahead label (0 sell, 1 hold, 2 buy, -1 unknown for the last bars).
 
 * The quantum part is a classical simulation of a 5-qubit circuit. It is a fixed nonlinear
   feature map, not a source of quantum speed-up.
-* `raw_spread` from Yahoo is the bar's high-low range, not a quoted spread; fills assume
+* `raw_spread` (Yahoo and Alpaca) is the bar's high-low range, not a quoted spread; fills assume
   at most a 5 bp spread.
 * Results on synthetic data only show that the machinery works; validate on real data
   before drawing conclusions.
