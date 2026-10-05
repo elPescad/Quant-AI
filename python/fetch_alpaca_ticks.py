@@ -19,12 +19,32 @@ from bar_schema import bars_to_ticks, epoch_seconds, regular_session_mask, write
 from fetch_real_ticks import OUTPUT_FILE, TARGET_TICKERS
 
 
+def env_value(*names):
+    """First set variable among names, stripped of the whitespace/quotes copy-paste tends to add."""
+    for name in names:
+        value = os.environ.get(name, "").strip().strip("'\"").strip()
+        if value:
+            return name, value
+    return None, None
+
+
 def credentials():
-    key = os.environ.get("APCA_API_KEY_ID") or os.environ.get("ALPACA_API_KEY")
-    secret = os.environ.get("APCA_API_SECRET_KEY") or os.environ.get("ALPACA_SECRET_KEY")
+    key_var, key = env_value("APCA_API_KEY_ID", "ALPACA_API_KEY")
+    secret_var, secret = env_value("APCA_API_SECRET_KEY", "ALPACA_SECRET_KEY")
     if not key or not secret:
         raise SystemExit("[-] Set APCA_API_KEY_ID and APCA_API_SECRET_KEY (Alpaca dashboard -> API keys)")
+    print(f"[+] Using key {key[:2]}...({len(key)} chars) from ${key_var}, secret ({len(secret)} chars) from ${secret_var}")
     return key, secret
+
+
+def auth_failure(e):
+    raise SystemExit(
+        f"[-] Alpaca rejected the API keys (HTTP {e.status_code}). Check that:\n"
+        "    1. Key ID and Secret are the pair shown together on the Trading API dashboard\n"
+        "       (regenerating keys invalidates the old pair; the secret is only shown once)\n"
+        "    2. they are Trading API keys (paper keys start with PK, live with AK);\n"
+        "       Broker API keys do not work with data.alpaca.markets\n"
+        "    3. they are exported in this shell: export APCA_API_KEY_ID=PK... APCA_API_SECRET_KEY=...")
 
 
 def download(client, days, feed):
@@ -41,8 +61,11 @@ def generate_raw_tick_dataset(days, feed, output_file):
     try:
         bars = download(client, days, feed)
     except APIError as e:
-        if feed != DataFeed.SIP:
+        if e.status_code == 401:
+            auth_failure(e)
+        if feed != DataFeed.SIP or e.status_code != 403:
             raise
+        # 403 = authenticated, but the plan does not include this SIP window
         print(f"    [!] SIP feed refused ({e}); falling back to IEX (IEX-only volume)")
         bars = download(client, days, DataFeed.IEX)
 
