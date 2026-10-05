@@ -33,6 +33,9 @@ def credentials():
     secret_var, secret = env_value("APCA_API_SECRET_KEY", "ALPACA_SECRET_KEY")
     if not key or not secret:
         raise SystemExit("[-] Set APCA_API_KEY_ID and APCA_API_SECRET_KEY (Alpaca dashboard -> API keys)")
+    if "..." in key or "..." in secret:
+        raise SystemExit(f"[-] ${key_var} / ${secret_var} still hold the placeholder from the README; "
+                         "replace them with your own keys from the Alpaca paper trading dashboard")
     print(f"[+] Using key {key[:2]}...({len(key)} chars) from ${key_var}, secret ({len(secret)} chars) from ${secret_var}")
     return key, secret
 
