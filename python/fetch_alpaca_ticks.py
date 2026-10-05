@@ -9,6 +9,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import requests
 from alpaca.common.exceptions import APIError
 from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
@@ -47,7 +48,27 @@ def auth_failure(e):
         "       (regenerating keys invalidates the old pair; the secret is only shown once)\n"
         "    2. they are Trading API keys (paper keys start with PK, live with AK);\n"
         "       Broker API keys do not work with data.alpaca.markets\n"
-        "    3. they are exported in this shell: export APCA_API_KEY_ID=PK... APCA_API_SECRET_KEY=...")
+        "    3. they are exported in this shell: export APCA_API_KEY_ID=PK... APCA_API_SECRET_KEY=...\n"
+        "    Run with --check-keys to see which Alpaca service accepts these keys.")
+
+
+def check_keys():
+    """Try the keys on each Alpaca service; which one accepts them says what kind of keys they are."""
+    key, secret = credentials()
+    headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+    probes = [
+        ("market data (this script)", "https://data.alpaca.markets/v2/stocks/bars/latest?symbols=SPY&feed=iex", headers, None),
+        ("paper trading account", "https://paper-api.alpaca.markets/v2/account", headers, None),
+        ("live trading account", "https://api.alpaca.markets/v2/account", headers, None),
+        ("Broker API sandbox", "https://broker-api.sandbox.alpaca.markets/v1/accounts?limit=1", None, (key, secret)),
+    ]
+    for name, url, hdrs, auth in probes:
+        try:
+            code = requests.get(url, headers=hdrs, auth=auth, timeout=15).status_code
+            verdict = {200: "ACCEPTED", 401: "rejected (unknown key/secret)", 403: "authenticated, but forbidden"}.get(code, "")
+        except requests.RequestException as e:
+            code, verdict = "-", f"no connection ({type(e).__name__})"
+        print(f"    {name:<27} HTTP {code}  {verdict}")
 
 
 def download(client, days, feed):
@@ -88,5 +109,9 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=180, help="calendar days of history (default 180)")
     parser.add_argument("--feed", choices=["sip", "iex"], default="sip")
     parser.add_argument("--output", type=Path, default=OUTPUT_FILE)
+    parser.add_argument("--check-keys", action="store_true", help="only test the keys against each Alpaca service")
     args = parser.parse_args()
-    generate_raw_tick_dataset(args.days, DataFeed(args.feed), args.output)
+    if args.check_keys:
+        check_keys()
+    else:
+        generate_raw_tick_dataset(args.days, DataFeed(args.feed), args.output)
