@@ -1,22 +1,38 @@
-"""Train on a tick CSV, then backtest every feature-set x allocator combination.
+"""Walk-forward selection of the trading configuration, then one look at the test period.
 
-    python python/compare_methods.py --data data/yahoo_ticks.csv
     python python/compare_methods.py --data data/alpaca_ticks.csv
 
-The method is chosen by validation Sharpe; test (held out, touched once) is reported for all.
-Results also go to <workdir>/results.csv.
+Timeline (by bar timestamp):
+    [ ........ pre-test (80%) ........ ][ test (20%) ]
+                     [ fold1 ][ fold2 ][ fold3 ]
+Fold k: models are trained only on data before the fold (train_and_export.py makes every
+model choice on a slice of that training data), then each candidate trades the fold.
+A candidate's score is its mean fold Sharpe minus one standard error across folds, so a
+configuration that looks great in one window only does not win. The selected candidate,
+and every other for reference, then trades the untouched test period once, with models
+retrained on all pre-test data.
+
+Candidates: features {raw, quantum, ensemble} x QUBO risk aversion gamma (gamma 0 == greedy).
+Results go to <workdir>/results.csv.
 """
 
 import argparse
 import csv
+import os
 import re
+import statistics as st
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import numpy as np
+import polars as pl
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-METHODS = [("quantum", "quant_model", "qubo"), ("quantum", "quant_model", "greedy"),
-           ("raw", "baseline_model", "qubo"), ("raw", "baseline_model", "greedy")]
+TEST_FRAC = 0.2        # Matches train_and_export.py's default (60/20/20)
+WALK_FORWARD_FRAC = 0.45  # Share of the pre-test period covered by the folds
+MODELS = {"raw": "baseline_model", "quantum": "quant_model", "ensemble": "ensemble_model"}
 METRICS = {
     "return_pct": r"Total Net PnL:.*\(([-\d.e+]+)%\)",
     "sharpe": r"Sharpe Ratio \(ann.\):\s+([-\d.e+]+)",
@@ -26,21 +42,42 @@ METRICS = {
 }
 
 
-def backtest(engine, data, model, allocator, period, workdir):
-    tag = f"{period}_{model}_{allocator}"
-    cmd = [str(engine), "--data", str(data), "--model", str(workdir / "models" / f"{model}.pt"),
-           "--allocator", allocator, "--period", period, "--trades", str(workdir / f"trades_{tag}.csv")]
+def train(data, model_dir, val_start, test_start, log):
+    model_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[+] Training -> {model_dir} (val from {val_start}, test from {test_start})", flush=True)
+    with log.open("w") as f:
+        r = subprocess.run([sys.executable, str(PROJECT_ROOT / "python" / "train_and_export.py"), "--data", str(data),
+                            "--model-dir", str(model_dir), "--val-start", str(val_start), "--test-start", str(test_start)],
+                           stdout=f, stderr=subprocess.STDOUT)
+    if r.returncode != 0:
+        sys.exit(f"[-] training failed, see {log}")
+
+
+def backtest(engine, data, model_dir, feats, gamma, start, end, log):
+    cmd = [str(engine), "--data", str(data), "--model", str(model_dir / f"{MODELS[feats]}.pt"),
+           "--start-ts", str(start), "--trades", str(log.with_suffix(".trades.csv"))]
+    if end is not None:
+        cmd += ["--end-ts", str(end)]
+    cmd += ["--allocator", "greedy"] if gamma == 0 else ["--allocator", "qubo", "--risk-aversion", str(gamma)]
     out = subprocess.run(cmd, capture_output=True, text=True)
-    (workdir / f"bt_{tag}.log").write_text(out.stdout + out.stderr)
+    log.write_text(out.stdout + out.stderr)
     if out.returncode != 0:
-        sys.exit(f"[-] {' '.join(cmd)} failed (full log: {workdir / f'bt_{tag}.log'}):\n{out.stderr[:1500]}")
+        sys.exit(f"[-] {' '.join(cmd)} failed (full log: {log}):\n{out.stderr[:1500]}")
     row = {}
     for key, pat in METRICS.items():
         m = re.search(pat, out.stdout)
         if not m:
-            sys.exit(f"[-] could not parse '{key}' from {workdir / f'bt_{tag}.log'}")
+            sys.exit(f"[-] could not parse '{key}' from {log}")
         row[key] = float(m.group(1))
     return row
+
+
+def run_all(jobs, engine, data, model_dir, candidates, start, end, logdir):
+    logdir.mkdir(parents=True, exist_ok=True)
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = {c: pool.submit(backtest, engine, data, model_dir, c[0], c[1], start, end,
+                                  logdir / f"bt_{c[0]}_g{c[1]:g}.log") for c in candidates}
+        return {c: f.result() for c, f in futures.items()}
 
 
 def main():
@@ -48,46 +85,78 @@ def main():
     p.add_argument("--data", type=Path, required=True)
     p.add_argument("--engine", type=Path, default=PROJECT_ROOT / "build" / "quant_engine")
     p.add_argument("--workdir", type=Path, help="default runs/<data file stem>")
-    p.add_argument("--skip-train", action="store_true", help="reuse models already in <workdir>/models")
+    p.add_argument("--folds", type=int, default=3)
+    p.add_argument("--gammas", type=float, nargs="+", default=[0.0, 25.0, 100.0], help="QUBO risk aversion grid (0 = greedy)")
+    p.add_argument("--min-trades", type=float, default=5.0, help="minimum average round trips per fold to be selectable")
+    p.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1), help="parallel backtests")
+    p.add_argument("--skip-train", action="store_true", help="reuse models already in <workdir>")
     a = p.parse_args()
+    if a.folds < 2:
+        sys.exit("[-] --folds must be at least 2 (the score needs a spread across folds)")
+
     data = a.data.resolve()
+    engine = a.engine.resolve()
     workdir = (a.workdir or PROJECT_ROOT / "runs" / data.stem).resolve()
-    (workdir / "models").mkdir(parents=True, exist_ok=True)
+    timeline = np.unique(pl.read_csv(data, columns=["timestamp"])["timestamp"].to_numpy())
+    test_start = int(timeline[int(len(timeline) * (1 - TEST_FRAC))])
+    pre = timeline[timeline < test_start]
+    first = int(len(pre) * (1 - WALK_FORWARD_FRAC))
+    edges = [int(pre[first + (len(pre) - first) * k // a.folds]) for k in range(a.folds)] + [test_start]
+    candidates = [(f, g) for f in MODELS for g in a.gammas]
+    print(f"[+] {len(timeline)} bars | {a.folds} walk-forward folds from {edges[0]} | test from {test_start}")
+    print(f"[+] {len(candidates)} candidates: {', '.join(MODELS)} x gamma {a.gammas}")
 
+    fold_results = []
+    for k in range(a.folds):
+        fold_dir = workdir / f"fold{k + 1}"
+        if not a.skip_train:
+            train(data, fold_dir / "models", edges[k], edges[k + 1], fold_dir / "train.log")
+        print(f"    fold {k + 1}: backtesting [{edges[k]}, {edges[k + 1]})", flush=True)
+        fold_results.append(run_all(a.jobs, engine, data, fold_dir / "models", candidates, edges[k], edges[k + 1], fold_dir))
+
+    final_dir = workdir / "final"
     if not a.skip_train:
-        print(f"[+] Training on {data} -> {workdir / 'models'}")
-        log = workdir / "train.log"
-        with log.open("w") as f:
-            r = subprocess.run([sys.executable, str(PROJECT_ROOT / "python" / "train_and_export.py"),
-                                "--data", str(data), "--model-dir", str(workdir / "models")], stdout=f, stderr=subprocess.STDOUT)
-        if r.returncode != 0:
-            sys.exit(f"[-] training failed, see {log}")
-        print((workdir / "models" / "training_report.txt").read_text())
+        train(data, final_dir / "models", test_start, test_start, final_dir / "train.log")
+    print(f"    test: backtesting [{test_start}, end)", flush=True)
+    test = run_all(a.jobs, engine, data, final_dir / "models", candidates, test_start, None, final_dir)
 
-    rows = []
-    for feats, model, alloc in METHODS:
-        for period in ("val", "test"):
-            print(f"    backtest {feats:>7} + {alloc:<6} on {period}")
-            rows.append({"method": f"{feats} + {alloc}", "period": period,
-                         **backtest(a.engine.resolve(), data, model, alloc, period, workdir)})
+    summary = {}
+    for c in candidates:
+        sharpes = [fr[c]["sharpe"] for fr in fold_results]
+        mean = st.mean(sharpes)
+        se = st.stdev(sharpes) / len(sharpes) ** 0.5
+        trades = st.mean(fr[c]["round_trips"] for fr in fold_results)
+        summary[c] = {"sharpes": sharpes, "mean": mean, "se": se, "score": mean - se, "trades": trades}
+    selectable = [c for c in candidates if summary[c]["trades"] >= a.min_trades and summary[c]["score"] > 0]
+    chosen = max(selectable, key=lambda c: summary[c]["score"]) if selectable else None
 
     with (workdir / "results.csv").open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=rows[0].keys())
-        w.writeheader()
-        w.writerows(rows)
+        w = csv.writer(f)
+        w.writerow(["features", "gamma", *[f"fold{k + 1}_sharpe" for k in range(a.folds)], "wf_mean", "wf_se", "wf_score",
+                    "wf_trades_per_fold", *[f"test_{m}" for m in METRICS], "selected"])
+        for c in candidates:
+            s = summary[c]
+            w.writerow([c[0], c[1], *s["sharpes"], s["mean"], s["se"], s["score"], s["trades"],
+                        *[test[c][m] for m in METRICS], c == chosen])
 
-    val = {r["method"]: r for r in rows if r["period"] == "val"}
-    test = {r["method"]: r for r in rows if r["period"] == "test"}
-    ranked = sorted(val, key=lambda m: val[m]["sharpe"], reverse=True)
-    print(f"\nResults for {data.name} (ranked by validation Sharpe)")
-    print(f"{'method':<18}{'val Sharpe':>12}{'test Sharpe':>13}{'test ret %':>12}{'test maxDD %':>14}{'trips':>7}{'expo %':>8}")
-    for m in ranked:
-        t = test[m]
-        print(f"{m:<18}{val[m]['sharpe']:>12.2f}{t['sharpe']:>13.2f}{t['return_pct']:>12.2f}"
-              f"{t['max_dd_pct']:>14.2f}{t['round_trips']:>7.0f}{t['exposure_pct']:>8.1f}")
-    best = ranked[0]
-    verdict = "POSITIVE" if test[best]["sharpe"] > 0 and test[best]["return_pct"] > 0 else "NEGATIVE"
-    print(f"\nSelected on validation: {best} -> test Sharpe {test[best]['sharpe']:.2f} ({verdict})")
+    print(f"\nResults for {data.name}: walk-forward ({a.folds} folds) vs held-out test, ranked by WF score = mean - SE")
+    print(f"{'':<2}{'features':<10}{'gamma':>6}{'WF Sharpe':>16}{'folds>0':>9}{'trips/fold':>11}"
+          f"{'test Sharpe':>13}{'test ret %':>11}{'test DD %':>10}{'trips':>7}")
+    for c in sorted(candidates, key=lambda c: summary[c]["score"], reverse=True):
+        s, t = summary[c], test[c]
+        print(f"{'*' if c == chosen else '':<2}{c[0]:<10}{c[1]:>6g}{s['mean']:>9.2f} ± {s['se']:<4.2f}"
+              f"{sum(x > 0 for x in s['sharpes']):>6}/{a.folds}{s['trades']:>11.1f}"
+              f"{t['sharpe']:>13.2f}{t['return_pct']:>11.2f}{t['max_dd_pct']:>10.2f}{t['round_trips']:>7.0f}")
+
+    if chosen is None:
+        print("\nNo candidate had a positive walk-forward score with enough trades: no consistent edge, "
+              "so the Sharpe-maximising decision is to stay flat.")
+    else:
+        s, t = summary[chosen], test[chosen]
+        inside = abs(t["sharpe"] - s["mean"]) <= 2 * max(s["se"], 1e-9) * a.folds ** 0.5
+        print(f"\nSelected: {chosen[0]} features, gamma {chosen[1]:g} | WF Sharpe {s['mean']:.2f} ± {s['se']:.2f} "
+              f"-> test Sharpe {t['sharpe']:.2f} ({'POSITIVE' if t['sharpe'] > 0 else 'NEGATIVE'}; "
+              f"{'within' if inside else 'outside'} the fold-to-fold range of ±2 sd)")
 
 
 if __name__ == "__main__":

@@ -1,19 +1,20 @@
-"""Train and export the quantum-feature-map GRU (plus baselines for comparison).
+"""Train and export the GRU models used by the engine.
 
-Data is split chronologically (no shuffling across time):
-    first 60% of bars -> train,  next 20% -> validation,  last 20% -> test
-Model choices (quantum bandwidth, early stopping) use validation only; test is touched once.
+Time splits (no shuffling across time):
+    [ fit | inner ]  [ val ]  [ test ]
+    fit    gradient steps
+    inner  last INNER_FRAC of the training window: early stopping, quantum bandwidth,
+           probability calibration. Every model choice is made here, so val stays
+           out-of-sample and a val backtest is an honest estimate.
+    val    [--val-start, --test-start): reported, never used for fitting or selection
+    test   [--test-start, end): reported, never used for fitting or selection
+Samples whose 6-bar-ahead label reaches across a split boundary are purged.
 
-Models compared on the held-out test split:
-    linear_raw     logistic regression on the 5 classical features of the last bar
-    linear_quantum logistic regression on the 67-dim quantum-lifted features of the last bar
-    gru_raw        GRU over the sequence of 5 classical features
-    gru_quantum    GRU over the sequence of quantum-lifted features   <- exported for trading
-
-Outputs (models/):
-    quant_model.pt + quant_model_config.txt          gru_quantum (used by the engine by default)
-    baseline_model.pt + baseline_model_config.txt    gru_raw, for A/B backtests
-    training_report.txt                              metrics table
+Exported (models/):
+    baseline_model   GRU on the 5 classical features
+    quant_model      GRU on classical + 62 quantum feature-map features
+    ensemble_model   average of the two calibrated GRUs' probabilities (quantum config)
+each with a _config.txt, plus training_report.txt.
 """
 
 import argparse
@@ -26,7 +27,7 @@ import polars as pl
 import torch
 import torch.nn as nn
 
-from quantum_features import FeatureConfig, classical_features, model_inputs
+from quantum_features import N_CLASSICAL, FeatureConfig, classical_features, model_inputs
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -35,7 +36,8 @@ MODEL_DIR = PROJECT_ROOT / "models"
 CSV_FILE = DATA_DIR / "market_ticks.csv"
 
 TRAIN_FRAC, VAL_FRAC = 0.6, 0.2
-BANDWIDTHS = [0.1, 0.25, 0.5, 1.0]  # Quantum kernel bandwidth candidates, chosen on validation
+INNER_FRAC = 0.2  # Share of the training window held out for early stopping / selection / calibration
+BANDWIDTHS = [0.1, 0.25, 0.5, 1.0]
 BATCH_SIZE = 256
 MAX_EPOCHS = 40
 PATIENCE = 6
@@ -57,7 +59,7 @@ class QuantGRU(nn.Module):
 
 
 class LastStepLinear(nn.Module):
-    """Logistic regression on the last bar's features: tests linear separability directly."""
+    """Logistic regression on the last bar's features (used to pick the quantum bandwidth)."""
 
     def __init__(self, input_dim, num_classes=3):
         super().__init__()
@@ -67,6 +69,38 @@ class LastStepLinear(nn.Module):
         return self.fc(x[:, -1, :])
 
 
+class Calibrated(nn.Module):
+    """logits / T + b, fitted on the inner split with unweighted NLL.
+
+    Training uses class weights, which distorts the probabilities; the engine turns
+    p_buy - p_sell into an expected return and compares it with trading costs, so the
+    probabilities themselves need to be right, not just their argmax."""
+
+    def __init__(self, base, temperature, bias, n_inputs):
+        super().__init__()
+        self.base = base
+        self.n_inputs = n_inputs
+        self.register_buffer("inv_t", torch.tensor(1.0 / temperature))
+        self.register_buffer("bias", bias.clone())
+
+    def forward(self, x):
+        return self.base(x[:, :, : self.n_inputs]) * self.inv_t + self.bias
+
+
+class Ensemble(nn.Module):
+    """Mean of the calibrated raw and quantum GRU probabilities, returned as log-probabilities
+    (the engine applies softmax, which recovers the averaged probabilities exactly)."""
+
+    def __init__(self, raw, quantum):
+        super().__init__()
+        self.raw = raw
+        self.quantum = quantum
+
+    def forward(self, x):
+        p = 0.5 * (torch.softmax(self.raw(x), 1) + torch.softmax(self.quantum(x), 1))
+        return torch.log(p.clamp_min(1e-12))
+
+
 # --------------------------------------------------------------------------------------
 # Data
 # --------------------------------------------------------------------------------------
@@ -74,13 +108,18 @@ def load_ticks():
     df = pl.read_csv(CSV_FILE)
     expected = ["timestamp", "ticker", "raw_price", "raw_spread", "raw_ofi", "raw_delta", "raw_vol", "target"]
     if df.columns[: len(expected)] != expected:
-        raise SystemExit(f"[-] {CSV_FILE} has columns {df.columns}; regenerate it with fetch_real_ticks.py or generate_ticks.py")
+        raise SystemExit(f"[-] {CSV_FILE} has columns {df.columns}; regenerate it with a fetch_*.py script or generate_ticks.py")
     return df.sort("timestamp", maintain_order=True)
 
 
-def split_timestamps(df):
-    ts = np.unique(df["timestamp"].to_numpy())
-    return int(ts[int(len(ts) * TRAIN_FRAC)]), int(ts[int(len(ts) * (TRAIN_FRAC + VAL_FRAC))])
+def default_boundaries(timeline):
+    return int(timeline[int(len(timeline) * TRAIN_FRAC)]), int(timeline[int(len(timeline) * (TRAIN_FRAC + VAL_FRAC))])
+
+
+def purge_before(timeline, boundary, horizon):
+    """Samples stamped before the returned timestamp have labels that end before `boundary`."""
+    idx = int(np.searchsorted(timeline, boundary))
+    return int(timeline[max(0, idx - horizon)]) if idx < len(timeline) else int(timeline[max(0, len(timeline) - horizon)])
 
 
 def per_ticker_classical(df, cfg):
@@ -131,16 +170,19 @@ def class_weights(y):
     return torch.tensor(np.sqrt(len(y) / (3.0 * counts + 1e-5)), dtype=torch.float32)
 
 
-def evaluate(model, data, idx, criterion):
+def predict_logits(model, data, idx):
     model.eval()
-    logits = []
+    out = []
     with torch.no_grad():
         for k in range(0, len(idx), 2048):
-            xb, _ = data.batch(idx[k:k + 2048])
-            logits.append(model(xb))
-    logits = torch.cat(logits)
+            out.append(model(data.batch(idx[k:k + 2048])[0]))
+    return torch.cat(out)
+
+
+def evaluate(model, data, idx):
+    logits = predict_logits(model, data, idx)
     y = torch.from_numpy(data.targets[idx]).long()
-    loss = criterion(logits, y).item()
+    nll = nn.functional.cross_entropy(logits, y).item()
     pred = logits.argmax(1).numpy()
     yt = y.numpy()
     f1s = []
@@ -151,20 +193,21 @@ def evaluate(model, data, idx, criterion):
         f1s.append(0.0 if prec + rec == 0 else 2 * prec * rec / (prec + rec))
     directional = pred != 1
     dir_prec = float(np.mean(pred[directional] == yt[directional])) if directional.any() else 0.0
-    return {"loss": loss, "acc": float(np.mean(pred == yt)), "macro_f1": float(np.mean(f1s)),
+    return {"nll": nll, "acc": float(np.mean(pred == yt)), "macro_f1": float(np.mean(f1s)),
             "dir_calls": float(np.mean(directional)), "dir_precision": dir_prec}
 
 
-def train(model, data, train_idx, val_idx, label):
+def train(model, data, fit_idx, stop_idx, label):
     torch.manual_seed(SEED)
     rng = np.random.default_rng(SEED)
-    criterion = nn.CrossEntropyLoss(weight=class_weights(data.targets[train_idx]))
+    criterion = nn.CrossEntropyLoss(weight=class_weights(data.targets[fit_idx]))
     opt = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+    y_stop = torch.from_numpy(data.targets[stop_idx]).long()
     best, best_state, bad = np.inf, None, 0
     t0 = time.time()
     for epoch in range(1, MAX_EPOCHS + 1):
         model.train()
-        perm = rng.permutation(train_idx)
+        perm = rng.permutation(fit_idx)
         for k in range(0, len(perm), BATCH_SIZE):
             xb, yb = data.batch(perm[k:k + BATCH_SIZE])
             opt.zero_grad()
@@ -172,16 +215,36 @@ def train(model, data, train_idx, val_idx, label):
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-        val = evaluate(model, data, val_idx, criterion)
-        if val["loss"] < best - 1e-4:
-            best, best_state, bad = val["loss"], copy.deepcopy(model.state_dict()), 0
+        stop_loss = criterion(predict_logits(model, data, stop_idx), y_stop).item()
+        if stop_loss < best - 1e-4:
+            best, best_state, bad = stop_loss, copy.deepcopy(model.state_dict()), 0
         else:
             bad += 1
             if bad >= PATIENCE:
                 break
     model.load_state_dict(best_state)
-    print(f"    {label:<15} {epoch:2d} epochs, best val loss {best:.4f} ({time.time() - t0:.0f}s)")
-    return model, criterion
+    model.eval()
+    print(f"    {label:<17} {epoch:2d} epochs, best inner loss {best:.4f} ({time.time() - t0:.0f}s)")
+    return model
+
+
+def calibrate(model, data, idx, n_inputs):
+    """Fit temperature + per-class bias on held-out logits (unweighted NLL)."""
+    logits = predict_logits(model, data, idx)
+    y = torch.from_numpy(data.targets[idx]).long()
+    log_t = torch.zeros(1, requires_grad=True)
+    bias = torch.zeros(3, requires_grad=True)
+    opt = torch.optim.LBFGS([log_t, bias], lr=0.5, max_iter=200)
+
+    def closure():
+        opt.zero_grad()
+        loss = nn.functional.cross_entropy(logits / log_t.exp() + bias, y)
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    t = float(log_t.detach().exp())
+    return Calibrated(model, t, bias.detach() - bias.detach().mean(), n_inputs).eval(), t
 
 
 def export(model, cfg, name):
@@ -193,75 +256,88 @@ def export(model, cfg, name):
     return traced
 
 
-def train_and_export():
+def train_and_export(val_ts=None, test_ts=None):
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     print(f"[+] Loading {CSV_FILE}")
     df = load_ticks()
-    val_ts, test_ts = split_timestamps(df)
-    print(f"[+] {len(df):,} ticks, {df['ticker'].n_unique()} tickers | val from {val_ts}, test from {test_ts}")
+    timeline = np.unique(df["timestamp"].to_numpy())
+    d_val, d_test = default_boundaries(timeline)
+    val_ts = d_val if val_ts is None else val_ts
+    test_ts = d_test if test_ts is None else test_ts
+    if not val_ts <= test_ts:
+        raise SystemExit("[-] --val-start must not be after --test-start")
 
     base_cfg = FeatureConfig(val_start_ts=val_ts, test_start_ts=test_ts)
+    horizon = base_cfg.label_horizon
+    train_ts = timeline[timeline < val_ts]
+    inner_ts = int(train_ts[int(len(train_ts) * (1.0 - INNER_FRAC))])
+    print(f"[+] {len(df):,} ticks, {df['ticker'].n_unique()} tickers | inner from {inner_ts}, val from {val_ts}, test from {test_ts}")
+
     t0 = time.time()
     classical = per_ticker_classical(df, base_cfg)
     print(f"[+] Classical features + RLS AR(1) in {time.time() - t0:.1f}s")
 
-    results = {}
-
-    # ---- Raw (classical-only) baselines ------------------------------------------------
     raw_cfg = FeatureConfig(**{**base_cfg.__dict__, "quantum_lift": 0})
     raw = WindowSet(classical, raw_cfg)
-    tr, va, te = raw.split(-np.inf, val_ts), raw.split(val_ts, test_ts), raw.split(test_ts, np.inf)
-    print(f"[+] Samples: {len(tr)} train | {len(va)} val | {len(te)} test")
-    print("[+] Training:")
-    m, crit = train(LastStepLinear(raw.dim), raw, tr, va, "linear_raw")
-    results["linear_raw"] = evaluate(m, raw, te, crit)
-    gru_raw, crit = train(QuantGRU(raw.dim), raw, tr, va, "gru_raw")
-    results["gru_raw"] = evaluate(gru_raw, raw, te, crit)
+    fit = raw.split(-np.inf, purge_before(timeline, inner_ts, horizon))
+    inner = raw.split(inner_ts, purge_before(timeline, val_ts, horizon))
+    val = raw.split(val_ts, purge_before(timeline, test_ts, horizon))
+    test = raw.split(test_ts, np.inf)
+    print(f"[+] Samples: {len(fit)} fit | {len(inner)} inner | {len(val)} val | {len(test)} test")
 
-    # ---- Quantum feature map: pick the bandwidth on validation -------------------------
-    best_bw, best_val, best_set = None, np.inf, None
+    print("[+] Training (all choices on the inner split):")
+    gru_raw = train(QuantGRU(raw.dim), raw, fit, inner, "gru_raw")
+
+    best_bw, best_loss, qset = None, np.inf, None
     for bw in BANDWIDTHS:
-        qcfg = FeatureConfig(**{**base_cfg.__dict__, "bandwidth": bw})
-        t0 = time.time()
-        qset = WindowSet(classical, qcfg)
-        sim_s = time.time() - t0
-        m, crit = train(LastStepLinear(qset.dim), qset, tr, va, f"linear_q(bw={bw})")
-        v = evaluate(m, qset, va, crit)
-        print(f"      quantum circuit simulation for {len(qset.features):,} ticks: {sim_s:.1f}s | val loss {v['loss']:.4f}")
-        if v["loss"] < best_val:
-            best_bw, best_val, best_set, best_lin = bw, v["loss"], qset, (m, crit)
+        cand = WindowSet(classical, FeatureConfig(**{**base_cfg.__dict__, "bandwidth": bw}))
+        lin = train(LastStepLinear(cand.dim), cand, fit, inner, f"linear_q(bw={bw})")
+        loss = evaluate(lin, cand, inner)["nll"]
+        if loss < best_loss:
+            best_bw, best_loss, qset = bw, loss, cand
     qcfg = FeatureConfig(**{**base_cfg.__dict__, "bandwidth": best_bw})
-    print(f"[+] Selected quantum bandwidth {best_bw} (validation)")
-    results["linear_quantum"] = evaluate(best_lin[0], best_set, te, best_lin[1])
-    gru_q, crit_q = train(QuantGRU(best_set.dim), best_set, tr, va, "gru_quantum")
-    results["gru_quantum"] = evaluate(gru_q, best_set, te, crit_q)
+    print(f"[+] Selected quantum bandwidth {best_bw} (inner split)")
+    gru_q = train(QuantGRU(qset.dim), qset, fit, inner, "gru_quantum")
 
-    # ---- Export ---------------------------------------------------------------------------
-    traced = export(gru_q, qcfg, "quant_model")
-    export(gru_raw, raw_cfg, "baseline_model")
-    # The traced module must reproduce the eager model (it is what the C++ engine runs)
-    xb, _ = best_set.batch(te[:512])
+    cal_raw, t_raw = calibrate(gru_raw, raw, inner, N_CLASSICAL)
+    cal_q, t_q = calibrate(gru_q, qset, inner, qset.dim)
+    ensemble = Ensemble(cal_raw, cal_q).eval()
+    print(f"[+] Calibration temperatures: raw {t_raw:.2f}, quantum {t_q:.2f}")
+
+    export(cal_raw, raw_cfg, "baseline_model")
+    export(cal_q, qcfg, "quant_model")
+    traced = export(ensemble, qcfg, "ensemble_model")
+    check = test if len(test) else inner
+    xb, _ = qset.batch(check[:512])
     with torch.no_grad():
-        drift = (traced(xb) - gru_q(xb)).abs().max().item()
+        drift = (traced(xb) - ensemble(xb)).abs().max().item()
 
-    lines = [f"Held-out test split ({len(te)} samples, timestamps >= {test_ts})",
-             f"{'model':<16}{'accuracy':>10}{'macro_f1':>10}{'buy/sell calls':>16}{'call precision':>16}"]
-    for name in ["linear_raw", "linear_quantum", "gru_raw", "gru_quantum"]:
-        r = results[name]
-        lines.append(f"{name:<16}{r['acc']:>10.3f}{r['macro_f1']:>10.3f}{100 * r['dir_calls']:>15.1f}%{r['dir_precision']:>16.3f}")
-    test_labels = best_set.targets[te]
-    lines.append(f"class mix (sell/hold/buy): {np.bincount(test_labels, minlength=3) / len(test_labels)}")
+    majority = int(np.bincount(raw.targets[fit], minlength=3).argmax())
+    lines = []
+    for split_name, idx in [("val", val), ("test", test)]:
+        if len(idx) == 0:
+            continue
+        lines.append(f"{split_name} split ({len(idx)} samples)")
+        lines.append(f"{'model':<16}{'accuracy':>10}{'macro_f1':>10}{'nll':>8}{'buy/sell calls':>16}{'call precision':>16}")
+        lines.append(f"{'always_' + ['sell', 'hold', 'buy'][majority]:<16}{np.mean(raw.targets[idx] == majority):>10.3f}")
+        for name, m, data in [("gru_raw", cal_raw, raw), ("gru_quantum", cal_q, qset), ("ensemble", ensemble, qset)]:
+            r = evaluate(m, data, idx)
+            lines.append(f"{name:<16}{r['acc']:>10.3f}{r['macro_f1']:>10.3f}{r['nll']:>8.4f}"
+                         f"{100 * r['dir_calls']:>15.1f}%{r['dir_precision']:>16.3f}")
+        lines.append(f"class mix (sell/hold/buy): {np.round(np.bincount(raw.targets[idx], minlength=3) / len(idx), 3)}")
     lines.append(f"quantum bandwidth {best_bw}, TorchScript export max |diff| {drift:.2e}")
     report = "\n".join(lines)
     (MODEL_DIR / "training_report.txt").write_text(report + "\n")
     print("\n" + report)
-    print(f"\n[+] Exported {MODEL_DIR / 'quant_model.pt'} (+ _config.txt) and baseline_model.pt")
+    print(f"\n[+] Exported baseline_model.pt, quant_model.pt, ensemble_model.pt (+ _config.txt) to {MODEL_DIR}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--data", type=Path, default=CSV_FILE, help="market ticks CSV")
     parser.add_argument("--model-dir", type=Path, default=MODEL_DIR, help="where to write models")
+    parser.add_argument("--val-start", type=int, help="first val timestamp; training uses data before it (default: 60%%)")
+    parser.add_argument("--test-start", type=int, help="first test timestamp (default: 80%%)")
     args = parser.parse_args()
     CSV_FILE, MODEL_DIR = args.data, args.model_dir
-    train_and_export()
+    train_and_export(args.val_start, args.test_start)

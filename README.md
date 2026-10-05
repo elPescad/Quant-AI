@@ -30,13 +30,16 @@ python python/fetch_alpaca_ticks.py      # Alpaca (alpaca-py): needs APCA_API_KE
 python python/fetch_real_ticks.py        # Yahoo: last 60 days only
 python python/generate_ticks.py          # synthetic data with a known signal
 
-# Compare all four methods (quantum/raw features x QUBO/greedy) on one dataset:
-# trains into runs/<name>/models, ranks by validation Sharpe, reports held-out test metrics
+# Pick the trading configuration by walk-forward validation (3 folds before the test period):
+# candidates = {raw, quantum, ensemble} features x QUBO gamma {0 (= greedy), 25, 100}.
+# Each fold retrains on data before it; score = mean fold Sharpe - 1 SE. Then one look at test.
 python python/compare_methods.py --data data/alpaca_ticks.csv
 
-# 2. Train. Splits by time: 60% train / 20% validation / 20% test.
-#    Writes models/quant_model.pt + quant_model_config.txt (quantum features)
-#    and models/baseline_model.pt + baseline_model_config.txt (raw features, for A/B)
+# 2. Train. Splits by time: 60% train / 20% validation / 20% test. Early stopping, quantum
+#    bandwidth and probability calibration use the last 20% of the training window, so the
+#    validation period stays out-of-sample. Labels crossing a split boundary are purged.
+#    Writes baseline_model.pt (raw), quant_model.pt (quantum), ensemble_model.pt (both),
+#    each with its _config.txt
 python python/train_and_export.py
 
 # 3. Build (Release by default) and run
