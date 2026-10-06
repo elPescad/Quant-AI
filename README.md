@@ -36,6 +36,9 @@ python python/generate_ticks.py          # synthetic data with a known signal
 # Each fold retrains on data before it; score = mean fold Sharpe - 1 SE. Then one look at test,
 # long/short P&L split, and a model_runner pass (C++ accuracy, signal strength, latency).
 python python/compare_methods.py --data data/alpaca_ticks.csv
+# Then check the result is skill and not market drift or luck (seconds, no training):
+# vs buy & hold, beta-adjusted market-neutral P&L, and a random-direction permutation test
+python python/sanity_check.py --data data/alpaca_ticks.csv
 
 # 2. Train. Splits by time: 60% train / 20% validation / 20% test. Early stopping, quantum
 #    bandwidth and probability calibration use the last 20% of the training window, so the
