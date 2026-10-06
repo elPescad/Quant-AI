@@ -14,6 +14,8 @@ Exported (models/):
     baseline_model   GRU on the 5 classical features
     quant_model      GRU on classical + 62 quantum feature-map features
     ensemble_model   average of the two calibrated GRUs' probabilities (quantum config)
+    quant_veto_model        quantum GRU, HOLD when the raw GRU disagrees on direction
+    quant_veto_short_model  same, but only quantum SELL calls need raw agreement
 each with a _config.txt, plus training_report.txt.
 """
 
@@ -98,6 +100,29 @@ class Ensemble(nn.Module):
 
     def forward(self, x):
         p = 0.5 * (torch.softmax(self.raw(x), 1) + torch.softmax(self.quantum(x), 1))
+        return torch.log(p.clamp_min(1e-12))
+
+
+class RawVeto(nn.Module):
+    """Quantum GRU trades; the raw GRU only stabilises. When the two disagree on direction
+    (opposite signs of p_buy - p_sell) the quantum call is replaced by HOLD. With
+    shorts_only, only quantum SELL calls need raw agreement."""
+
+    def __init__(self, quantum, raw, shorts_only):
+        super().__init__()
+        self.quantum = quantum
+        self.raw = raw
+        self.shorts_only = shorts_only
+        self.register_buffer("hold", torch.tensor([[0.0, 1.0, 0.0]]))
+
+    def forward(self, x):
+        pq = torch.softmax(self.quantum(x), 1)
+        pr = torch.softmax(self.raw(x), 1)
+        eq = pq[:, 2] - pq[:, 0]
+        veto = eq * (pr[:, 2] - pr[:, 0]) < 0
+        if self.shorts_only:
+            veto = veto & (eq < 0)
+        p = torch.where(veto.unsqueeze(1), self.hold, pq)
         return torch.log(p.clamp_min(1e-12))
 
 
@@ -302,11 +327,15 @@ def train_and_export(val_ts=None, test_ts=None):
     cal_raw, t_raw = calibrate(gru_raw, raw, inner, N_CLASSICAL)
     cal_q, t_q = calibrate(gru_q, qset, inner, qset.dim)
     ensemble = Ensemble(cal_raw, cal_q).eval()
+    veto = RawVeto(cal_q, cal_raw, shorts_only=False).eval()
+    veto_short = RawVeto(cal_q, cal_raw, shorts_only=True).eval()
     print(f"[+] Calibration temperatures: raw {t_raw:.2f}, quantum {t_q:.2f}")
 
     export(cal_raw, raw_cfg, "baseline_model")
     export(cal_q, qcfg, "quant_model")
     traced = export(ensemble, qcfg, "ensemble_model")
+    export(veto, qcfg, "quant_veto_model")
+    export(veto_short, qcfg, "quant_veto_short_model")
     check = test if len(test) else inner
     xb, _ = qset.batch(check[:512])
     with torch.no_grad():
@@ -320,7 +349,8 @@ def train_and_export(val_ts=None, test_ts=None):
         lines.append(f"{split_name} split ({len(idx)} samples)")
         lines.append(f"{'model':<16}{'accuracy':>10}{'macro_f1':>10}{'nll':>8}{'buy/sell calls':>16}{'call precision':>16}")
         lines.append(f"{'always_' + ['sell', 'hold', 'buy'][majority]:<16}{np.mean(raw.targets[idx] == majority):>10.3f}")
-        for name, m, data in [("gru_raw", cal_raw, raw), ("gru_quantum", cal_q, qset), ("ensemble", ensemble, qset)]:
+        for name, m, data in [("gru_raw", cal_raw, raw), ("gru_quantum", cal_q, qset), ("ensemble", ensemble, qset),
+                               ("q_veto", veto, qset), ("q_veto_short", veto_short, qset)]:
             r = evaluate(m, data, idx)
             lines.append(f"{name:<16}{r['acc']:>10.3f}{r['macro_f1']:>10.3f}{r['nll']:>8.4f}"
                          f"{100 * r['dir_calls']:>15.1f}%{r['dir_precision']:>16.3f}")
@@ -329,7 +359,7 @@ def train_and_export(val_ts=None, test_ts=None):
     report = "\n".join(lines)
     (MODEL_DIR / "training_report.txt").write_text(report + "\n")
     print("\n" + report)
-    print(f"\n[+] Exported baseline_model.pt, quant_model.pt, ensemble_model.pt (+ _config.txt) to {MODEL_DIR}")
+    print(f"\n[+] Exported baseline, quant, ensemble, quant_veto, quant_veto_short models (+ _config.txt) to {MODEL_DIR}")
 
 
 if __name__ == "__main__":

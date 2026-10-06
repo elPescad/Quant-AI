@@ -31,15 +31,17 @@ python python/fetch_real_ticks.py        # Yahoo: last 60 days only
 python python/generate_ticks.py          # synthetic data with a known signal
 
 # Pick the trading configuration by walk-forward validation (3 folds before the test period):
-# candidates = {raw, quantum, ensemble} features x QUBO gamma {0 (= greedy), 25, 100}.
-# Each fold retrains on data before it; score = mean fold Sharpe - 1 SE. Then one look at test.
+# candidates = {quantum, ensemble, q_veto, q_veto_short} x QUBO gamma {0 (= greedy), 25, 100}
+# (q_veto: quantum GRU trades, raw GRU can only veto; _short: only SELL calls need agreement).
+# Each fold retrains on data before it; score = mean fold Sharpe - 1 SE. Then one look at test,
+# long/short P&L split, and a model_runner pass (C++ accuracy, signal strength, latency).
 python python/compare_methods.py --data data/alpaca_ticks.csv
 
 # 2. Train. Splits by time: 60% train / 20% validation / 20% test. Early stopping, quantum
 #    bandwidth and probability calibration use the last 20% of the training window, so the
 #    validation period stays out-of-sample. Labels crossing a split boundary are purged.
-#    Writes baseline_model.pt (raw), quant_model.pt (quantum), ensemble_model.pt (both),
-#    each with its _config.txt
+#    Writes baseline_model.pt (raw), quant_model.pt (quantum), ensemble_model.pt (average),
+#    quant_veto_model.pt and quant_veto_short_model.pt (raw vetoes quantum), each with _config.txt
 python python/train_and_export.py
 
 # 3. Build (Release by default) and run

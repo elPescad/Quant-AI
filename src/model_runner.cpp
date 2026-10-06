@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <climits>
 #include <fstream>
 #include <iomanip>
@@ -83,7 +84,7 @@ int main(int argc, char** argv) {
     torch::Tensor input = torch::zeros({1, cfg.seq_len, cfg.input_dim()}, torch::kFloat32);
 
     long confusion[3][3] = {{0}};
-    std::vector<double> feature_us, model_us;
+    std::vector<double> feature_us, model_us, abs_edge;
     MarketTick tick;
     while (std::getline(file, line)) {
         if (!parse_tick_row(line, tick)) continue;
@@ -104,6 +105,9 @@ int main(int argc, char** argv) {
         model_us.push_back(std::chrono::duration<double, std::micro>(t3 - t2).count());
 
         const int pred = static_cast<int>(logits.argmax(1).item<int64_t>());
+        // The engine trades on p_buy - p_sell, so its spread decides how often costs are beaten
+        const torch::Tensor probs = torch::softmax(logits, 1);
+        abs_edge.push_back(std::abs(probs[0][2].item<double>() - probs[0][0].item<double>()));
         confusion[tick.target][pred]++;
     }
 
@@ -140,9 +144,15 @@ int main(int argc, char** argv) {
     }
 
     auto mean = [](const std::vector<double>& v) { return v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size(); };
+    auto pct = [](std::vector<double> v, double q) {
+        std::sort(v.begin(), v.end());
+        return v.empty() ? 0.0 : v[std::min(v.size() - 1, static_cast<size_t>(q * v.size()))];
+    };
     std::cout << "\nAccuracy:   " << static_cast<double>(correct) / total << "\n"
               << "Macro F1:   " << f1_sum / 3.0 << "\n"
               << std::setprecision(2)
+              << "Edge |p_buy - p_sell|: mean " << mean(abs_edge) << " | p50 " << pct(abs_edge, 0.50)
+              << " | p90 " << pct(abs_edge, 0.90) << " | p99 " << pct(abs_edge, 0.99) << "\n"
               << "Latency:    features+quantum sim " << mean(feature_us) << " us | GRU forward " << mean(model_us) << " us\n\n"
               << "AR(1) order-flow persistence (RLS, end of data):\n";
     for (const auto& [name, pipe] : pipes) {

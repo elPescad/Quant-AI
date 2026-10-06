@@ -12,7 +12,13 @@ configuration that looks great in one window only does not win. The selected can
 and every other for reference, then trades the untouched test period once, with models
 retrained on all pre-test data.
 
-Candidates: features {raw, quantum, ensemble} x QUBO risk aversion gamma (gamma 0 == greedy).
+Candidates: model x QUBO risk aversion gamma (gamma 0 == greedy), where model is
+    quantum       quantum GRU alone
+    ensemble      average of quantum and raw GRU probabilities
+    q_veto        quantum GRU; HOLD when the raw GRU points the other way
+    q_veto_short  quantum GRU; only its SELL calls need raw agreement
+Long and short P&L are reported separately. Finally model_runner (C++ inference, no trading)
+scores every model on the last fold and on test: accuracy, signal strength, latency.
 Results go to <workdir>/results.csv.
 """
 
@@ -32,7 +38,15 @@ import polars as pl
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEST_FRAC = 0.2        # Matches train_and_export.py's default (60/20/20)
 WALK_FORWARD_FRAC = 0.45  # Share of the pre-test period covered by the folds
-MODELS = {"raw": "baseline_model", "quantum": "quant_model", "ensemble": "ensemble_model"}
+MODELS = {"quantum": "quant_model", "ensemble": "ensemble_model",
+          "q_veto": "quant_veto_model", "q_veto_short": "quant_veto_short_model"}
+RUNNER_METRICS = {
+    "accuracy": r"Accuracy:\s+([-\d.]+)",
+    "macro_f1": r"Macro F1:\s+([-\d.]+)",
+    "edge_p90": r"Edge .*p90 ([-\d.]+)",
+    "edge_p99": r"Edge .*p99 ([-\d.]+)",
+    "gru_us": r"GRU forward ([-\d.]+) us",
+}
 METRICS = {
     "return_pct": r"Total Net PnL:.*\(([-\d.e+]+)%\)",
     "sharpe": r"Sharpe Ratio \(ann.\):\s+([-\d.e+]+)",
@@ -69,7 +83,37 @@ def backtest(engine, data, model_dir, feats, gamma, start, end, log):
         if not m:
             sys.exit(f"[-] could not parse '{key}' from {log}")
         row[key] = float(m.group(1))
+    row.update(side_pnl(log.with_suffix(".trades.csv")))
     return row
+
+
+def side_pnl(trades_csv):
+    """Gross P&L ($, before fees) of closed long and short round trips in an engine trade log."""
+    out = {"long_pnl": 0.0, "short_pnl": 0.0, "long_trips": 0, "short_trips": 0}
+    open_pos = {}
+    with trades_csv.open() as f:
+        for r in csv.DictReader(f):
+            price, units = float(r["fill_price"]), abs(float(r["units_traded"]))
+            if r["action"] in ("OPEN_LONG", "OPEN_SHORT"):
+                open_pos[r["ticker"]] = (1 if r["action"] == "OPEN_LONG" else -1, price, units)
+            elif r["ticker"] in open_pos:
+                side, entry, n = open_pos.pop(r["ticker"])
+                key = "long" if side > 0 else "short"
+                out[f"{key}_pnl"] += side * (price - entry) * n
+                out[f"{key}_trips"] += 1
+    return out
+
+
+def model_runner(runner, data, model, period):
+    out = subprocess.run([str(runner), "--data", str(data), "--model", str(model), "--period", period],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return None
+    vals = {}
+    for key, pat in RUNNER_METRICS.items():
+        m = re.search(pat, out.stdout)
+        vals[key] = float(m.group(1)) if m else float("nan")
+    return vals
 
 
 def run_all(jobs, engine, data, model_dir, candidates, start, end, logdir):
@@ -84,6 +128,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--data", type=Path, required=True)
     p.add_argument("--engine", type=Path, default=PROJECT_ROOT / "build" / "quant_engine")
+    p.add_argument("--runner", type=Path, default=PROJECT_ROOT / "build" / "model_runner")
     p.add_argument("--workdir", type=Path, help="default runs/<data file stem>")
     p.add_argument("--folds", type=int, default=3)
     p.add_argument("--gammas", type=float, nargs="+", default=[0.0, 25.0, 100.0], help="QUBO risk aversion grid (0 = greedy)")
@@ -126,37 +171,62 @@ def main():
         mean = st.mean(sharpes)
         se = st.stdev(sharpes) / len(sharpes) ** 0.5
         trades = st.mean(fr[c]["round_trips"] for fr in fold_results)
-        summary[c] = {"sharpes": sharpes, "mean": mean, "se": se, "score": mean - se, "trades": trades}
+        summary[c] = {"sharpes": sharpes, "mean": mean, "se": se, "score": mean - se, "trades": trades,
+                      "long": sum(fr[c]["long_pnl"] for fr in fold_results),
+                      "short": sum(fr[c]["short_pnl"] for fr in fold_results)}
     selectable = [c for c in candidates if summary[c]["trades"] >= a.min_trades and summary[c]["score"] > 0]
     chosen = max(selectable, key=lambda c: summary[c]["score"]) if selectable else None
 
     with (workdir / "results.csv").open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["features", "gamma", *[f"fold{k + 1}_sharpe" for k in range(a.folds)], "wf_mean", "wf_se", "wf_score",
-                    "wf_trades_per_fold", *[f"test_{m}" for m in METRICS], "selected"])
+        w.writerow(["model", "gamma", *[f"fold{k + 1}_sharpe" for k in range(a.folds)], "wf_mean", "wf_se", "wf_score",
+                    "wf_trades_per_fold", "wf_long_pnl", "wf_short_pnl", *[f"test_{m}" for m in METRICS],
+                    "test_long_pnl", "test_short_pnl", "selected"])
         for c in candidates:
-            s = summary[c]
-            w.writerow([c[0], c[1], *s["sharpes"], s["mean"], s["se"], s["score"], s["trades"],
-                        *[test[c][m] for m in METRICS], c == chosen])
+            s, t = summary[c], test[c]
+            w.writerow([c[0], c[1], *s["sharpes"], s["mean"], s["se"], s["score"], s["trades"], s["long"], s["short"],
+                        *[t[m] for m in METRICS], t["long_pnl"], t["short_pnl"], c == chosen])
 
     print(f"\nResults for {data.name}: walk-forward ({a.folds} folds) vs held-out test, ranked by WF score = mean - SE")
-    print(f"{'':<2}{'features':<10}{'gamma':>6}{'WF Sharpe':>16}{'folds>0':>9}{'trips/fold':>11}"
-          f"{'test Sharpe':>13}{'test ret %':>11}{'test DD %':>10}{'trips':>7}")
+    print(f"{'':<2}{'model':<14}{'gamma':>6}{'WF Sharpe':>16}{'folds>0':>9}{'trips/fold':>11}{'WF long $':>11}{'WF short $':>11}"
+          f"{'test Sharpe':>13}{'test ret %':>11}{'trips':>7}{'long $':>9}{'short $':>9}")
     for c in sorted(candidates, key=lambda c: summary[c]["score"], reverse=True):
         s, t = summary[c], test[c]
-        print(f"{'*' if c == chosen else '':<2}{c[0]:<10}{c[1]:>6g}{s['mean']:>9.2f} ± {s['se']:<4.2f}"
-              f"{sum(x > 0 for x in s['sharpes']):>6}/{a.folds}{s['trades']:>11.1f}"
-              f"{t['sharpe']:>13.2f}{t['return_pct']:>11.2f}{t['max_dd_pct']:>10.2f}{t['round_trips']:>7.0f}")
+        print(f"{'*' if c == chosen else '':<2}{c[0]:<14}{c[1]:>6g}{s['mean']:>9.2f} ± {s['se']:<4.2f}"
+              f"{sum(x > 0 for x in s['sharpes']):>6}/{a.folds}{s['trades']:>11.1f}{s['long']:>11.2f}{s['short']:>11.2f}"
+              f"{t['sharpe']:>13.2f}{t['return_pct']:>11.2f}{t['round_trips']:>7.0f}{t['long_pnl']:>9.2f}{t['short_pnl']:>9.2f}")
+    print("(long $ / short $: gross P&L of closed long / short round trips on $10k; WF columns sum all folds)")
 
     if chosen is None:
         print("\nNo candidate had a positive walk-forward score with enough trades: no consistent edge, "
               "so the Sharpe-maximising decision is to stay flat.")
     else:
         s, t = summary[chosen], test[chosen]
-        inside = abs(t["sharpe"] - s["mean"]) <= 2 * max(s["se"], 1e-9) * a.folds ** 0.5
-        print(f"\nSelected: {chosen[0]} features, gamma {chosen[1]:g} | WF Sharpe {s['mean']:.2f} ± {s['se']:.2f} "
-              f"-> test Sharpe {t['sharpe']:.2f} ({'POSITIVE' if t['sharpe'] > 0 else 'NEGATIVE'}; "
-              f"{'within' if inside else 'outside'} the fold-to-fold range of ±2 sd)")
+        if t["round_trips"] == 0:
+            verdict = "NO TRADES in test: nothing to judge"
+        else:
+            inside = abs(t["sharpe"] - s["mean"]) <= 2 * max(s["se"], 1e-9) * a.folds ** 0.5
+            verdict = (f"{'POSITIVE' if t['sharpe'] > 0 else 'NEGATIVE'}; "
+                       f"{'within' if inside else 'outside'} the fold-to-fold range of ±2 sd")
+        print(f"\nSelected: {chosen[0]}, gamma {chosen[1]:g} | WF Sharpe {s['mean']:.2f} ± {s['se']:.2f} "
+              f"-> test Sharpe {t['sharpe']:.2f} ({verdict})")
+
+    runner = a.runner.resolve()
+    if not runner.exists():
+        print(f"\n[!] {runner} not found: skipping the model_runner check")
+        return
+    last_fold = workdir / f"fold{a.folds}" / "models"
+    print(f"\nmodel_runner (C++ inference, no trading): fold {a.folds} models on fold {a.folds} | final models on test")
+    print(f"{'model':<14}{'accuracy':>18}{'macro F1':>18}{'edge p90':>18}{'edge p99':>18}{'GRU us':>10}")
+    for name, file in [("raw", "baseline_model"), *MODELS.items()]:
+        f = model_runner(runner, data, last_fold / f"{file}.pt", "val")
+        t = model_runner(runner, data, final_dir / "models" / f"{file}.pt", "test")
+        if f is None or t is None:
+            print(f"{name:<14} model_runner failed")
+            continue
+        cells = "".join(f"{f[k]:>9.3f} / {t[k]:<6.3f}" for k in ("accuracy", "macro_f1", "edge_p90", "edge_p99"))
+        print(f"{name:<14}{cells}{t['gru_us']:>10.0f}")
+    print("(each cell: last fold / test; the engine only trades when edge x typical move beats the round-trip cost)")
 
 
 if __name__ == "__main__":
