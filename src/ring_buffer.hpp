@@ -13,6 +13,33 @@ inline void cpu_relax() { asm volatile("yield"); }
 inline void cpu_relax() {}
 #endif
 
+#include <chrono>
+#include <thread>
+
+// Wait strategy for an empty/full queue: spin briefly (lowest latency while data is
+// flowing), then yield, then sleep. Busy-spinning forever would burn a whole vCPU even
+// when the market is closed, which on a small shared-core VM also eats the CPU budget.
+class Backoff {
+public:
+    void wait() {
+        if (n_ < kSpins) {
+            cpu_relax();
+        } else if (n_ < kSpins + kYields) {
+            std::this_thread::yield();
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            return;
+        }
+        n_++;
+    }
+    void reset() { n_ = 0; }
+
+private:
+    static constexpr int kSpins = 2000;
+    static constexpr int kYields = 100;
+    int n_ = 0;
+};
+
 // Wait-free single-producer / single-consumer ring buffer.
 // Exactly one thread may call push() and exactly one other thread may call pop().
 template <typename T, size_t Capacity>

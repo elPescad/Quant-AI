@@ -68,7 +68,7 @@ def train(data, model_dir, val_start, test_start, log):
 
 
 def backtest(engine, data, model_dir, feats, gamma, start, end, log):
-    cmd = [str(engine), "--data", str(data), "--model", str(model_dir / f"{MODELS[feats]}.pt"),
+    cmd = [str(engine), "--data", str(data), "--model", str(model_dir / f"{MODELS[feats]}.weights"),
            "--start-ts", str(start), "--trades", str(log.with_suffix(".trades.csv"))]
     if end is not None:
         cmd += ["--end-ts", str(end)]
@@ -219,8 +219,8 @@ def main():
     print(f"\nmodel_runner (C++ inference, no trading): fold {a.folds} models on fold {a.folds} | final models on test")
     print(f"{'model':<14}{'accuracy':>18}{'macro F1':>18}{'edge p90':>18}{'edge p99':>18}{'GRU us':>10}")
     for name, file in [("raw", "baseline_model"), *MODELS.items()]:
-        f = model_runner(runner, data, last_fold / f"{file}.pt", "val")
-        t = model_runner(runner, data, final_dir / "models" / f"{file}.pt", "test")
+        f = model_runner(runner, data, last_fold / f"{file}.weights", "val")
+        t = model_runner(runner, data, final_dir / "models" / f"{file}.weights", "test")
         if f is None or t is None:
             print(f"{name:<14} model_runner failed")
             continue

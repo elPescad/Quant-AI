@@ -1,6 +1,7 @@
-// Unit tests for the non-ML parts of the engine. No libtorch dependency.
+// Unit tests for the engine, including native GRU inference parity with PyTorch.
 // Run from the repository root (or pass the fixture directory as argv[1]).
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -22,6 +23,7 @@
 #include "qubo.hpp"
 #include "qubo_allocator.hpp"
 #include "ring_buffer.hpp"
+#include "native_model.hpp"
 
 static int g_failures = 0;
 static int g_checks = 0;
@@ -382,6 +384,52 @@ static void test_portfolio() {
     CHECK(pm3.mark(1, "X", 98.5f, 0.0f) && pm3.direction("X") == 0, "hard stop closes a losing long");
 }
 
+// Native C++ GRU vs PyTorch on random-weight models in every combine mode
+// (fixture from python/native_model.py --fixture tests/fixtures)
+static void test_native_gru(const std::string& fixture_dir) {
+    std::cout << "[native gru] parity with PyTorch\n";
+    std::ifstream in(fixture_dir + "/gru_parity_inputs.bin", std::ios::binary);
+    if (!in) {
+        std::cout << "  [SKIP] fixture not found in " << fixture_dir << " (run python/native_model.py --fixture)\n";
+        return;
+    }
+    int32_t dims[3];
+    in.read(reinterpret_cast<char*>(dims), sizeof(dims));
+    const int cases = dims[0], seq_len = dims[1], input_dim = dims[2];
+    std::vector<float> x(static_cast<size_t>(cases) * seq_len * input_dim);
+    in.read(reinterpret_cast<char*>(x.data()), static_cast<std::streamsize>(x.size() * sizeof(float)));
+    CHECK(static_cast<bool>(in), "parity inputs readable");
+
+    std::map<std::string, std::vector<std::array<double, 3>>> expected;
+    std::ifstream csv(fixture_dir + "/gru_parity_expected.csv");
+    std::string line;
+    std::getline(csv, line);
+    while (std::getline(csv, line)) {
+        auto c = split_csv(line);
+        expected[c[0]].push_back({std::stod(c[2]), std::stod(c[3]), std::stod(c[4])});
+    }
+    for (const char* name : {"single", "mean", "veto", "veto_short"}) {
+        NativeModel m = NativeModel::load(fixture_dir + "/gru_parity_" + name + ".weights");
+        CHECK(m.input_dim() == input_dim, std::string(name) + ": input_dim read from file");
+        double max_err = 0.0;
+        int vetoed = 0;
+        for (int i = 0; i < cases; ++i) {
+            float p[3];
+            m.predict(x.data() + static_cast<size_t>(i) * seq_len * input_dim, seq_len, input_dim, p);
+            for (int k = 0; k < 3; ++k) max_err = std::max(max_err, std::abs(p[k] - expected[name][i][k]));
+            vetoed += p[1] == 1.0f;
+        }
+        CHECK(static_cast<int>(expected[name].size()) == cases && max_err < 1e-5,
+              std::string(name) + ": C++ probabilities match PyTorch (max err " + std::to_string(max_err) + ")");
+        std::cout << "    " << name << ": max |p_cpp - p_torch| " << max_err;
+        if (std::string(name).rfind("veto", 0) == 0) std::cout << ", " << vetoed << "/" << cases << " vetoed";
+        std::cout << "\n";
+    }
+    bool threw = false;
+    try { NativeModel::load(fixture_dir + "/feature_parity_config.txt"); } catch (const std::exception&) { threw = true; }
+    CHECK(threw, "non-model file is rejected");
+}
+
 int main(int argc, char** argv) {
     const std::string fixtures = argc > 1 ? argv[1] : "tests/fixtures";
     test_quantum_gates();
@@ -390,6 +438,7 @@ int main(int argc, char** argv) {
     test_qubo();
     test_allocator();
     test_ring_buffer();
+    test_native_gru(fixtures);
     test_portfolio();
     std::cout << "\n" << (g_checks - g_failures) << "/" << g_checks << " checks passed\n";
     return g_failures == 0 ? 0 : 1;

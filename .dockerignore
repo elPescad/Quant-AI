@@ -1,0 +1,5 @@
+# Only the C++ sources and tests go into the build context
+*
+!CMakeLists.txt
+!src/
+!tests/

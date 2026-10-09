@@ -16,7 +16,8 @@ Exported (models/):
     ensemble_model   average of the two calibrated GRUs' probabilities (quantum config)
     quant_veto_model        quantum GRU, HOLD when the raw GRU disagrees on direction
     quant_veto_short_model  same, but only quantum SELL calls need raw agreement
-each with a _config.txt, plus training_report.txt.
+each as <name>.weights (QGRU format, read by the C++ engine without libtorch, see
+python/native_model.py) with a <name>_config.txt, plus training_report.txt.
 """
 
 import argparse
@@ -29,6 +30,7 @@ import polars as pl
 import torch
 import torch.nn as nn
 
+from native_model import write_native
 from quantum_features import N_CLASSICAL, FeatureConfig, classical_features, model_inputs
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -272,13 +274,9 @@ def calibrate(model, data, idx, n_inputs):
     return Calibrated(model, t, bias.detach() - bias.detach().mean(), n_inputs).eval(), t
 
 
-def export(model, cfg, name):
-    model.eval()
-    example = torch.zeros(1, cfg.seq_len, cfg.input_dim)
-    traced = torch.jit.freeze(torch.jit.trace(model, example))
-    traced.save(str(MODEL_DIR / f"{name}.pt"))
+def export(nets, combine, cfg, name):
+    write_native(MODEL_DIR / f"{name}.weights", nets, combine)
     cfg.write(MODEL_DIR / f"{name}_config.txt")
-    return traced
 
 
 def train_and_export(val_ts=None, test_ts=None):
@@ -331,15 +329,11 @@ def train_and_export(val_ts=None, test_ts=None):
     veto_short = RawVeto(cal_q, cal_raw, shorts_only=True).eval()
     print(f"[+] Calibration temperatures: raw {t_raw:.2f}, quantum {t_q:.2f}")
 
-    export(cal_raw, raw_cfg, "baseline_model")
-    export(cal_q, qcfg, "quant_model")
-    traced = export(ensemble, qcfg, "ensemble_model")
-    export(veto, qcfg, "quant_veto_model")
-    export(veto_short, qcfg, "quant_veto_short_model")
-    check = test if len(test) else inner
-    xb, _ = qset.batch(check[:512])
-    with torch.no_grad():
-        drift = (traced(xb) - ensemble(xb)).abs().max().item()
+    export([cal_raw], "single", raw_cfg, "baseline_model")
+    export([cal_q], "single", qcfg, "quant_model")
+    export([cal_raw, cal_q], "mean", qcfg, "ensemble_model")
+    export([cal_q, cal_raw], "veto", qcfg, "quant_veto_model")
+    export([cal_q, cal_raw], "veto_short", qcfg, "quant_veto_short_model")
 
     majority = int(np.bincount(raw.targets[fit], minlength=3).argmax())
     lines = []
@@ -355,7 +349,7 @@ def train_and_export(val_ts=None, test_ts=None):
             lines.append(f"{name:<16}{r['acc']:>10.3f}{r['macro_f1']:>10.3f}{r['nll']:>8.4f}"
                          f"{100 * r['dir_calls']:>15.1f}%{r['dir_precision']:>16.3f}")
         lines.append(f"class mix (sell/hold/buy): {np.round(np.bincount(raw.targets[idx], minlength=3) / len(idx), 3)}")
-    lines.append(f"quantum bandwidth {best_bw}, TorchScript export max |diff| {drift:.2e}")
+    lines.append(f"quantum bandwidth {best_bw}")
     report = "\n".join(lines)
     (MODEL_DIR / "training_report.txt").write_text(report + "\n")
     print("\n" + report)

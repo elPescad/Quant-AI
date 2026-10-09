@@ -1,15 +1,13 @@
 // Low-latency quant paper-trading engine.
 //
-//   producer thread : CSV -> MarketTick -> SPSC ring buffer
+//   producer thread : CSV file or stdin -> MarketTick -> SPSC ring buffer
 //   consumer thread : per-ticker features (EWMA z-scores, RLS AR(1), simulated ZZ quantum
-//                     feature map) -> TorchScript GRU -> per-bar QUBO allocation solved by
-//                     simulated annealing -> portfolio rebalance + per-tick risk exits
+//                     feature map) -> native C++ GRU (no libtorch) -> per-bar allocation
+//                     (greedy, or QUBO solved by simulated annealing) -> portfolio
+//                     rebalance + per-tick risk exits
 //
 // By default only the held-out test period (from the model's config) is traded; the
 // earlier data is streamed through to warm up the feature state.
-
-#include <torch/script.h>
-#include <torch/torch.h>
 
 #include <algorithm>
 #include <atomic>
@@ -31,7 +29,9 @@
 #endif
 
 #include "feature_pipeline.hpp"
+#include "latency_stats.hpp"
 #include "market_data.hpp"
+#include "native_model.hpp"
 #include "portfolio.hpp"
 #include "qubo_allocator.hpp"
 #include "ring_buffer.hpp"
@@ -42,10 +42,10 @@ constexpr int COOLDOWN_BARS = 6; // No re-entry for this many bars after a risk 
 
 struct EngineOptions {
     std::string data_path = "../data/market_ticks.csv";
-    std::string model_path = "../models/quant_model.pt";
+    std::string model_path = "../models/ensemble_model.weights";
     std::string config_path; // Defaults to <model>_config.txt
     std::string trades_path = "trades.csv";
-    std::string allocator = "qubo"; // qubo | greedy
+    std::string allocator = "greedy"; // greedy | qubo  (greedy == QUBO at gamma 0, the walk-forward pick)
     std::string period = "test";    // test | val | all
     int64_t start_ts = INT64_MIN;
     int64_t end_ts = INT64_MAX;
@@ -57,12 +57,12 @@ struct EngineOptions {
 
 void usage() {
     std::cout << "Usage: quant_engine [options]\n"
-                 "  --data PATH            market ticks CSV (default ../data/market_ticks.csv)\n"
-                 "  --model PATH           TorchScript model (default ../models/quant_model.pt)\n"
+                 "  --data PATH            market ticks CSV, or - for stdin (default ../data/market_ticks.csv)\n"
+                 "  --model PATH           .weights model (default ../models/ensemble_model.weights)\n"
                  "  --config PATH          feature config (default <model>_config.txt)\n"
                  "  --period test|val|all  which split to trade (default test = out-of-sample)\n"
                  "  --start-ts T --end-ts T  explicit trading window (unix seconds)\n"
-                 "  --allocator qubo|greedy  position selection (default qubo)\n"
+                 "  --allocator greedy|qubo  position selection (default greedy = QUBO at gamma 0)\n"
                  "  --risk-aversion X      QUBO risk aversion gamma (default 100)\n"
                  "  --max-positions K      max simultaneous positions (default 4)\n"
                  "  --verify-qubo          check every SA solution against brute force\n"
@@ -93,9 +93,10 @@ bool parse_args(int argc, char** argv, EngineOptions& o) {
         else throw std::runtime_error("Unknown option " + a);
     }
     if (o.config_path.empty()) {
-        std::string base = o.model_path;
-        if (base.size() > 3 && base.substr(base.size() - 3) == ".pt") base = base.substr(0, base.size() - 3);
-        o.config_path = base + "_config.txt";
+        const size_t slash = o.model_path.find_last_of('/');
+        const size_t dot = o.model_path.find_last_of('.');
+        const bool has_ext = dot != std::string::npos && (slash == std::string::npos || dot > slash);
+        o.config_path = (has_ext ? o.model_path.substr(0, dot) : o.model_path) + "_config.txt";
     }
     if (o.allocator != "qubo" && o.allocator != "greedy") throw std::runtime_error("--allocator must be qubo or greedy");
     return true;
@@ -108,7 +109,7 @@ std::atomic<long> rows_skipped(0);
 
 void pin_thread_to_core(std::thread& th, int core_id) {
 #ifdef __linux__
-    if (core_id >= static_cast<int>(std::thread::hardware_concurrency())) return;
+    if (core_id < 0 || core_id >= static_cast<int>(std::thread::hardware_concurrency())) return;
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(core_id, &cpuset);
@@ -120,15 +121,19 @@ void pin_thread_to_core(std::thread& th, int core_id) {
 }
 
 void file_stream_producer(const std::string& csv_file) {
-    std::ifstream file(csv_file);
-    if (!file.is_open()) {
-        std::cerr << "[-] Error opening market data file: " << csv_file << std::endl;
-        stream_finished.store(true, std::memory_order_release);
-        return;
+    std::ifstream file;
+    if (csv_file != "-") {
+        file.open(csv_file);
+        if (!file.is_open()) {
+            std::cerr << "[-] Error opening market data file: " << csv_file << std::endl;
+            stream_finished.store(true, std::memory_order_release);
+            return;
+        }
     }
+    std::istream& input = csv_file == "-" ? std::cin : file;
 
     std::string line;
-    std::getline(file, line);
+    std::getline(input, line);
     if (!is_tick_csv_header(line)) {
         std::cerr << "[-] Unexpected CSV header: " << line << "\n"
                   << "    Expected: " << kTickCsvHeader << "\n"
@@ -138,15 +143,18 @@ void file_stream_producer(const std::string& csv_file) {
     }
 
     int tick_id = 0;
-    while (std::getline(file, line) && !stop_requested.load(std::memory_order_relaxed)) {
+    Backoff backoff;
+    while (std::getline(input, line) && !stop_requested.load(std::memory_order_relaxed)) {
         MarketTick tick;
         if (!parse_tick_row(line, tick)) {
             rows_skipped.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
         tick.id = tick_id++;
+        backoff.reset();
         while (!event_queue.push(tick)) [[unlikely]] {
-            cpu_relax();
+            if (stop_requested.load(std::memory_order_relaxed)) break;
+            backoff.wait();
         }
     }
     stream_finished.store(true, std::memory_order_release);
@@ -168,9 +176,9 @@ struct TickerState {
 };
 
 struct EngineStats {
-    std::vector<double> feature_us; // Feature pipeline incl. quantum circuit simulation
-    std::vector<double> model_us;   // GRU forward
-    std::vector<double> alloc_us;   // QUBO build + anneal per bar
+    LatencyStats feature_us; // Feature pipeline incl. quantum circuit simulation
+    LatencyStats model_us;   // GRU forward
+    LatencyStats alloc_us;   // Allocation per bar
     long bars = 0;
     long trading_bars = 0;
     long ticks = 0;
@@ -178,26 +186,27 @@ struct EngineStats {
 
 class Engine {
 public:
-    Engine(const EngineOptions& opt, const FeatureConfig& cfg, torch::jit::script::Module& model)
+    Engine(const EngineOptions& opt, const FeatureConfig& cfg, NativeModel& model)
         : opt_(opt), cfg_(cfg), model_(model),
           portfolio_(make_portfolio_params(opt)),
           risk_(0.99),
           allocator_(make_alloc_params(opt, cfg), risk_),
-          input_(torch::zeros({1, cfg.seq_len, cfg.input_dim()}, torch::kFloat32)) {}
+          window_(static_cast<size_t>(cfg.seq_len) * cfg.input_dim(), 0.0f) {}
 
     void run() {
-        torch::InferenceMode guard;
         MarketTick tick;
+        Backoff backoff;
         while (true) {
             // Read the flag BEFORE popping: if the producer had already finished and the
             // queue is still empty, every tick has been consumed.
             const bool producer_done = stream_finished.load(std::memory_order_acquire);
             if (event_queue.try_pop(tick)) [[likely]] {
+                backoff.reset();
                 if (!done_trading_) on_tick(tick);
             } else if (producer_done) {
                 break;
             } else {
-                cpu_relax();
+                backoff.wait();
             }
         }
         if (!done_trading_) {
@@ -207,14 +216,8 @@ public:
     }
 
     void report(double wall_sec) const {
-        auto pct = [](std::vector<double> v, double q) {
-            if (v.empty()) return 0.0;
-            std::sort(v.begin(), v.end());
-            return v[std::min(v.size() - 1, static_cast<size_t>(q * v.size()))];
-        };
-        auto mean = [](const std::vector<double>& v) {
-            return v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size();
-        };
+        auto pct = [](const LatencyStats& v, double q) { return v.quantile(q); };
+        auto mean = [](const LatencyStats& v) { return v.mean(); };
 
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "\n==================================================\n"
@@ -224,7 +227,7 @@ public:
                   << stats_.trading_bars << " traded)\n"
                   << "Feature+Quantum Sim:   avg " << mean(stats_.feature_us) << " us | p99 " << pct(stats_.feature_us, 0.99) << " us\n"
                   << "GRU Forward:           avg " << mean(stats_.model_us) << " us | p99 " << pct(stats_.model_us, 0.99) << " us\n"
-                  << "QUBO Allocation/bar:   avg " << mean(stats_.alloc_us) << " us | p99 " << pct(stats_.alloc_us, 0.99) << " us\n"
+                  << "Allocation/bar:        avg " << mean(stats_.alloc_us) << " us | p99 " << pct(stats_.alloc_us, 0.99) << " us\n"
                   << "Throughput:            " << static_cast<long>(stats_.ticks / std::max(wall_sec, 1e-9)) << " ticks/sec\n";
 
         if (opt_.allocator == "qubo") {
@@ -329,7 +332,7 @@ private:
         auto t0 = std::chrono::steady_clock::now();
         const bool ready = st.pipeline.update(tick);
         auto t1 = std::chrono::steady_clock::now();
-        stats_.feature_us.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+        stats_.feature_us.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
 
         st.last_price = tick.raw_price;
         st.seen_this_bar = true;
@@ -339,14 +342,13 @@ private:
         }
 
         if (ready && trading_now()) {
-            st.pipeline.copy_window(input_.data_ptr<float>());
+            st.pipeline.copy_window(window_.data());
+            float p[3];
             auto t2 = std::chrono::steady_clock::now();
-            torch::Tensor logits = model_.forward({input_}).toTensor();
-            torch::Tensor probs = torch::softmax(logits, 1);
+            model_.predict(window_.data(), cfg_.seq_len, cfg_.input_dim(), p);
             auto t3 = std::chrono::steady_clock::now();
-            stats_.model_us.push_back(std::chrono::duration<double, std::micro>(t3 - t2).count());
+            stats_.model_us.add(std::chrono::duration<double, std::micro>(t3 - t2).count());
 
-            const float* p = probs.data_ptr<float>();
             st.edge = static_cast<double>(p[2]) - static_cast<double>(p[0]);
             st.signal_bar = bar_index_;
         }
@@ -402,7 +404,7 @@ private:
             portfolio_.rebalance(last_tick_id_, targets);
 
             auto t1 = std::chrono::steady_clock::now();
-            if (!views.empty()) stats_.alloc_us.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+            if (!views.empty()) stats_.alloc_us.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
             portfolio_.record_equity();
 
             if (opt_.verbose && bar_index_ % 50 == 0) {
@@ -422,11 +424,11 @@ private:
 
     const EngineOptions& opt_;
     const FeatureConfig& cfg_;
-    torch::jit::script::Module& model_;
+    NativeModel& model_;
     PortfolioManager portfolio_;
     RiskModel risk_;
     QuboAllocator allocator_;
-    torch::Tensor input_;
+    std::vector<float> window_;
 
     std::unordered_map<std::string, std::unique_ptr<TickerState>> states_;
     std::vector<std::string> asset_names_;
@@ -463,13 +465,16 @@ int main(int argc, char** argv) {
     if (opt.end_ts != INT64_MAX) end = opt.end_ts;
     if (opt.period == "all") std::cout << "[!] Trading the full file: this includes the training period (in-sample)." << std::endl;
 
-    at::set_num_threads(1);
-    torch::jit::script::Module module;
+    NativeModel module;
     try {
-        module = torch::jit::load(opt.model_path);
-        module.eval();
-    } catch (const c10::Error& e) {
+        module = NativeModel::load(opt.model_path);
+    } catch (const std::exception& e) {
         std::cerr << "[-] Error loading model: " << e.what() << std::endl;
+        return 1;
+    }
+    if (module.input_dim() != cfg.input_dim()) {
+        std::cerr << "[-] Model reads " << module.input_dim() << " features but " << opt.config_path << " produces "
+                  << cfg.input_dim() << "; the model and config must come from the same training run" << std::endl;
         return 1;
     }
     std::cout << "[+] Model " << opt.model_path << " | quantum_lift=" << cfg.quantum_lift << " (" << cfg.n_qubits
@@ -483,8 +488,8 @@ int main(int argc, char** argv) {
     auto wall_start = std::chrono::steady_clock::now();
     std::thread producer(file_stream_producer, opt.data_path);
     std::thread consumer([&engine] { engine.run(); });
-    pin_thread_to_core(producer, 1);
-    pin_thread_to_core(consumer, 2);
+    // Only the latency-critical consumer gets a core of its own (the last one)
+    pin_thread_to_core(consumer, static_cast<int>(std::thread::hardware_concurrency()) - 1);
     producer.join();
     consumer.join();
     double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();

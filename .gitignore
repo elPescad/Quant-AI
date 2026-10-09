@@ -17,6 +17,7 @@ __pycache__/
 
 # Large Model Weights & Data
 models/*.pt
+models/*.weights
 *.csv
 !tests/fixtures/*.csv
 *.parquet

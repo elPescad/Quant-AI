@@ -1,12 +1,9 @@
 // Offline model evaluation: runs the exact C++ inference path (feature pipeline +
-// simulated quantum feature map + TorchScript GRU) over a data split and scores the
-// predictions against the CSV labels. No trading, no threads.
+// simulated quantum feature map + native C++ GRU, no libtorch) over a data split and
+// scores the predictions against the CSV labels. No trading, no threads.
 //
 // Its accuracy should match what python/train_and_export.py reports for the same
 // split; a mismatch means the C++ and Python feature pipelines have drifted apart.
-
-#include <torch/script.h>
-#include <torch/torch.h>
 
 #include <algorithm>
 #include <chrono>
@@ -22,11 +19,13 @@
 #include <vector>
 
 #include "feature_pipeline.hpp"
+#include "latency_stats.hpp"
 #include "market_data.hpp"
+#include "native_model.hpp"
 
 int main(int argc, char** argv) {
     std::string data_path = "../data/market_ticks.csv";
-    std::string model_path = "../models/quant_model.pt";
+    std::string model_path = "../models/ensemble_model.weights";
     std::string config_path;
     std::string period = "test";
 
@@ -43,9 +42,10 @@ int main(int argc, char** argv) {
         }
     }
     if (config_path.empty()) {
-        std::string base = model_path;
-        if (base.size() > 3 && base.substr(base.size() - 3) == ".pt") base = base.substr(0, base.size() - 3);
-        config_path = base + "_config.txt";
+        const size_t slash = model_path.find_last_of('/');
+        const size_t dot = model_path.find_last_of('.');
+        const bool has_ext = dot != std::string::npos && (slash == std::string::npos || dot > slash);
+        config_path = (has_ext ? model_path.substr(0, dot) : model_path) + "_config.txt";
     }
 
     FeatureConfig cfg;
@@ -62,16 +62,17 @@ int main(int argc, char** argv) {
     else if (period == "train") end = cfg.val_start_ts;
     else if (period != "all") { std::cerr << "[-] Unknown period " << period << std::endl; return 1; }
 
-    torch::jit::script::Module module;
+    NativeModel module;
     try {
-        module = torch::jit::load(model_path);
-        module.eval();
-    } catch (const c10::Error& e) {
+        module = NativeModel::load(model_path);
+    } catch (const std::exception& e) {
         std::cerr << "[-] Error loading model: " << e.what() << std::endl;
         return 1;
     }
-    at::set_num_threads(1);
-    torch::InferenceMode guard;
+    if (module.input_dim() != cfg.input_dim()) {
+        std::cerr << "[-] Model reads " << module.input_dim() << " features but the config produces " << cfg.input_dim() << std::endl;
+        return 1;
+    }
 
     std::ifstream file(data_path);
     std::string line;
@@ -81,10 +82,11 @@ int main(int argc, char** argv) {
     }
 
     std::map<std::string, std::unique_ptr<TickerFeaturePipeline>> pipes;
-    torch::Tensor input = torch::zeros({1, cfg.seq_len, cfg.input_dim()}, torch::kFloat32);
+    std::vector<float> window(static_cast<size_t>(cfg.seq_len) * cfg.input_dim(), 0.0f);
 
     long confusion[3][3] = {{0}};
-    std::vector<double> feature_us, model_us, abs_edge;
+    LatencyStats feature_us, model_us;
+    std::vector<float> abs_edge;
     MarketTick tick;
     while (std::getline(file, line)) {
         if (!parse_tick_row(line, tick)) continue;
@@ -94,20 +96,20 @@ int main(int argc, char** argv) {
         auto t0 = std::chrono::steady_clock::now();
         const bool ready = pipe->update(tick);
         auto t1 = std::chrono::steady_clock::now();
-        feature_us.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+        feature_us.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
 
         if (!ready || tick.target < 0 || tick.timestamp < start || tick.timestamp >= end) continue;
 
-        pipe->copy_window(input.data_ptr<float>());
+        pipe->copy_window(window.data());
+        float probs[3];
         auto t2 = std::chrono::steady_clock::now();
-        torch::Tensor logits = module.forward({input}).toTensor();
+        module.predict(window.data(), cfg.seq_len, cfg.input_dim(), probs);
         auto t3 = std::chrono::steady_clock::now();
-        model_us.push_back(std::chrono::duration<double, std::micro>(t3 - t2).count());
+        model_us.add(std::chrono::duration<double, std::micro>(t3 - t2).count());
 
-        const int pred = static_cast<int>(logits.argmax(1).item<int64_t>());
+        const int pred = static_cast<int>(std::max_element(probs, probs + 3) - probs);
         // The engine trades on p_buy - p_sell, so its spread decides how often costs are beaten
-        const torch::Tensor probs = torch::softmax(logits, 1);
-        abs_edge.push_back(std::abs(probs[0][2].item<double>() - probs[0][0].item<double>()));
+        abs_edge.push_back(std::abs(probs[2] - probs[0]));
         confusion[tick.target][pred]++;
     }
 
@@ -143,17 +145,18 @@ int main(int argc, char** argv) {
                   << " f1 " << f1 << "\n";
     }
 
-    auto mean = [](const std::vector<double>& v) { return v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size(); };
-    auto pct = [](std::vector<double> v, double q) {
+    auto mean = [](const std::vector<float>& v) { return v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size(); };
+    auto pct = [](std::vector<float> v, double q) {
         std::sort(v.begin(), v.end());
-        return v.empty() ? 0.0 : v[std::min(v.size() - 1, static_cast<size_t>(q * v.size()))];
+        return v.empty() ? 0.0 : static_cast<double>(v[std::min(v.size() - 1, static_cast<size_t>(q * v.size()))]);
     };
     std::cout << "\nAccuracy:   " << static_cast<double>(correct) / total << "\n"
               << "Macro F1:   " << f1_sum / 3.0 << "\n"
               << std::setprecision(2)
               << "Edge |p_buy - p_sell|: mean " << mean(abs_edge) << " | p50 " << pct(abs_edge, 0.50)
               << " | p90 " << pct(abs_edge, 0.90) << " | p99 " << pct(abs_edge, 0.99) << "\n"
-              << "Latency:    features+quantum sim " << mean(feature_us) << " us | GRU forward " << mean(model_us) << " us\n\n"
+              << "Latency:    features+quantum sim " << feature_us.mean() << " us | GRU forward " << model_us.mean()
+              << " us (p99 " << model_us.quantile(0.99) << ")\n\n"
               << "AR(1) order-flow persistence (RLS, end of data):\n";
     for (const auto& [name, pipe] : pipes) {
         const auto& ar = pipe->ar();
