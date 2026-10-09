@@ -1,9 +1,14 @@
 # Slim runtime image for the C++ engine (no Python, no libtorch).
 #
 #   docker build -t quant-engine .
-#   docker run --rm --cpus=2 --memory=1g --user "$(id -u):$(id -g)" \
+#   docker run --rm --network=none --cpus=2 --memory=1g --user "$(id -u):$(id -g)" \
 #     -v "$PWD/models:/app/models:ro" -v "$PWD/data:/app/data:ro" -v "$PWD/out:/app/out" \
 #     quant-engine
+#
+# A backtest needs no network, so --network=none. If the build fails with "failed to add
+# the host (veth...) <=> sandbox (veth...) pair interfaces: operation not supported", the
+# host kernel cannot create Docker's virtual network interfaces (on Arch: the kernel was
+# upgraded without a reboot). Reboot, or build with `docker build --network=host ...`.
 #
 # Models come from python/train_and_export.py (run outside the container). Any engine flag
 # can be appended, e.g. `quant-engine --data /app/data/alpaca_ticks.csv --period val`;

@@ -66,10 +66,15 @@ model classes, regenerate the parity fixture with `python python/native_model.py
 
 ```bash
 docker build -t quant-engine .           # compiles, runs engine_tests, keeps only the binaries
-docker run --rm --cpus=2 --memory=1g --user "$(id -u):$(id -g)" \
+docker run --rm --network=none --cpus=2 --memory=1g --user "$(id -u):$(id -g)" \
   -v "$PWD/models:/app/models:ro" -v "$PWD/data:/app/data:ro" -v "$PWD/out:/app/out" \
   quant-engine                           # = quant_engine on /app/data/market_ticks.csv
 ```
+
+If the build fails with `failed to add the host (veth...) <=> sandbox (veth...) pair interfaces:
+operation not supported`, Docker cannot create its virtual network interfaces on this host
+(on Arch: the kernel was upgraded and the running kernel's modules are gone until a reboot).
+Reboot, or build with `docker build --network=host -t quant-engine .`.
 
 The image is ~30 MB compressed (the Debian slim base; the two binaries are 4.4 MB). The build
 targets x86-64-v3 so an image built on one machine runs on any current x86 cloud VM.
