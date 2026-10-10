@@ -4,6 +4,7 @@
 """
 
 import argparse
+import copy
 import struct
 from pathlib import Path
 
@@ -62,7 +63,36 @@ def write_fixture(out_dir, seq_len=10, input_dim=67, n_raw=5, hidden=16, cases=2
             probs = torch.softmax(module(x), 1)
             lines += [f"{name},{i},{p[0]:.9g},{p[1]:.9g},{p[2]:.9g}" for i, p in enumerate(probs.tolist())]
     (out_dir / "gru_parity_expected.csv").write_text("\n".join(lines) + "\n")
-    print(f"[+] Wrote GRU parity fixture ({cases} cases x {len(models)} models) to {out_dir}")
+
+    # Online learning reference: the C++ learn() rule, with gradients from autograd
+    lr, anchor = 0.05, 0.1
+    groups = [[copy.deepcopy(m) for m in g] for g in [raw_m, q_m]]
+    initial = [[(m.base.head.weight.detach().clone(), m.base.head.bias.detach().clone(), m.inv_t.clone(), m.bias.clone())
+                for m in g] for g in groups]
+    for i in range(cases):
+        y = torch.tensor([i % 3])
+        for g, g0 in zip(groups, initial):
+            for m, (w0, b0, t0, c0) in zip(g, g0):
+                xin = x[i:i + 1, :, : m.n_inputs]
+                with torch.no_grad():
+                    out, _ = m.base.gru(xin)
+                    z = torch.cat([out[:, -1, :], xin[:, -1, :]], 1)
+                w = m.base.head.weight.detach().clone().requires_grad_()
+                b = m.base.head.bias.detach().clone().requires_grad_()
+                t = m.inv_t.clone().requires_grad_()
+                c = m.bias.clone().requires_grad_()
+                torch.nn.functional.cross_entropy((z @ w.T + b) * t + c, y).backward()
+                with torch.no_grad():
+                    m.base.head.weight.copy_(w - lr * (w.grad + anchor * (w - w0)))
+                    m.base.head.bias.copy_(b - lr * (b.grad + anchor * (b - b0)))
+                    m.inv_t.copy_((t - lr * (t.grad + anchor * (t - t0))).clamp(0.2, 5.0))
+                    m.bias.copy_(c - lr * (c.grad + anchor * (c - c0)))
+    with torch.no_grad():
+        adapted = torch.softmax(Ensemble(SeedAverage(groups[0]), SeedAverage(groups[1]))(x), 1)
+    rows = [f"mean,{i},{q[0]:.9g},{q[1]:.9g},{q[2]:.9g}" for i, q in enumerate(adapted.tolist())]
+    (out_dir / "gru_online_expected.csv").write_text(f"# lr={lr} anchor={anchor} labels=case%3\nmodel,case,p_sell,p_hold,p_buy\n"
+                                                    + "\n".join(rows) + "\n")
+    print(f"[+] Wrote GRU parity fixture ({cases} cases x {len(models)} models, plus online learning) to {out_dir}")
 
 
 if __name__ == "__main__":

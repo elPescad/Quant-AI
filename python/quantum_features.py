@@ -31,6 +31,7 @@ class FeatureConfig:
     reps: int = 2
     bandwidth: float = 0.5
     label_horizon: int = 6
+    label_hurdle: float = 0.0004  # BUY/SELL return threshold; the engine's online learning labels bars with it
     val_start_ts: int = 0
     test_start_ts: int = 0
 

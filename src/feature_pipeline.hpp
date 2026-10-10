@@ -36,6 +36,7 @@ struct FeatureConfig {
     int reps = 2;
     double bandwidth = 0.5;
     int label_horizon = 6;
+    double label_hurdle = 0.0004; // 6-bar return beyond +/- this = BUY / SELL (python/bar_schema.py)
     int64_t val_start_ts = 0;  // Written by train_and_export.py: first timestamp NOT used for training
     int64_t test_start_ts = 0; // First timestamp of the held-out test period
 
@@ -73,6 +74,7 @@ struct FeatureConfig {
         get_i("reps", c.reps);
         get_d("bandwidth", c.bandwidth);
         get_i("label_horizon", c.label_horizon);
+        get_d("label_hurdle", c.label_hurdle);
         get_l("val_start_ts", c.val_start_ts);
         get_l("test_start_ts", c.test_start_ts);
 

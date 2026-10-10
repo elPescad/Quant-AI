@@ -56,6 +56,7 @@ def main():
     p.add_argument("--workdir", type=Path, help="compare_methods.py workdir (default runs/<data stem>)")
     p.add_argument("--model", help="candidate model (default: the selected one in results.csv)")
     p.add_argument("--gamma", type=float)
+    p.add_argument("--online-lr", type=float, default=0.0)
     p.add_argument("--permutations", type=int, default=20000)
     a = p.parse_args()
     workdir = (a.workdir or PROJECT_ROOT / "runs" / a.data.resolve().stem).resolve()
@@ -66,9 +67,12 @@ def main():
         if not chosen:
             sys.exit("[-] results.csv has no selected candidate; pass --model and --gamma")
         a.model, a.gamma = chosen[0]["model"], float(chosen[0]["gamma"])
-    row = next((r for r in results if r["model"] == a.model and float(r["gamma"]) == a.gamma), None)
+        a.online_lr = float(chosen[0].get("online_lr", 0) or 0)
+    row = next((r for r in results if r["model"] == a.model and float(r["gamma"]) == a.gamma
+                and float(r.get("online_lr", 0) or 0) == a.online_lr), None)
     if row is None:
-        sys.exit(f"[-] {a.model} gamma {a.gamma:g} is not in {workdir / 'results.csv'}")
+        sys.exit(f"[-] {a.model} gamma {a.gamma:g} online lr {a.online_lr:g} is not in {workdir / 'results.csv'}")
+    suffix = f"_lr{a.online_lr:g}" if a.online_lr > 0 else ""
     n_folds = sum(1 for k in row if k.startswith("fold") and k.endswith("_sharpe"))
 
     df = pl.read_csv(a.data, columns=["timestamp", "ticker", "raw_price"])
@@ -90,7 +94,7 @@ def main():
     windows.append(("test", workdir / "final", int(cfg["test_start_ts"]), int(stamps[-1]) + 1, float(row["test_sharpe"])))
 
     rng = np.random.default_rng(0)
-    print(f"Sanity check: {a.model}, gamma {a.gamma:g} ({workdir})\n")
+    print(f"Sanity check: {a.model}, gamma {a.gamma:g}, online lr {a.online_lr:g} ({workdir})\n")
     print(f"{'window':<8}{'strategy':>10}{'buy&hold':>10}{'trips':>7}{'gross $':>10}{'all-long $':>12}"
           f"{'mkt-neutral $':>15}{'hit rate':>10}{'p (random dir)':>16}")
     print(f"{'':<8}{'Sharpe':>10}{'Sharpe':>10}")
@@ -98,7 +102,7 @@ def main():
     for name, wdir, lo, hi, strat_sharpe in windows:
         in_win = (stamps[1:] >= lo) & (stamps[1:] < hi)
         bh = sharpe(basket[in_win])
-        trips = round_trips(wdir / f"bt_{a.model}_g{a.gamma:g}.trades.csv", ts_of_tick)
+        trips = round_trips(wdir / f"bt_{a.model}_g{a.gamma:g}{suffix}.trades.csv", ts_of_tick)
         if not trips:
             print(f"{name:<8}{strat_sharpe:>10.2f}{bh:>10.2f}{0:>7}{'no trades':>12}")
             continue

@@ -39,7 +39,7 @@ python python/generate_ticks.py          # synthetic data with a known signal
 # (q_veto: quantum GRU trades, raw GRU can only veto; _short: only SELL calls need agreement).
 # Each fold retrains on data before it; score = mean fold Sharpe - 1 SE. Then one look at test,
 # long/short P&L split, and a model_runner pass (C++ accuracy, signal strength, latency).
-python python/compare_methods.py --data data/alpaca_ticks.csv
+python python/compare_methods.py --data data/alpaca_ticks.csv   # add --online-lrs 0 0.001 0.003 to test online learning
 # Then check the result is skill and not market drift or luck (seconds, no training):
 # vs buy & hold, beta-adjusted market-neutral P&L, and a random-direction permutation test
 python python/sanity_check.py --data data/alpaca_ticks.csv
@@ -91,13 +91,15 @@ to start without the config. Re-run `train_and_export.py` after changing the fea
 ```bash
 export APCA_API_KEY_ID=... APCA_API_SECRET_KEY=...
 ./quant_engine --live-check                   # clock, REST and stream connections (works when the market is closed)
-./quant_engine --live --model ../models/ensemble_model.weights --trades live_trades.csv
-# or in Docker, running until stopped:
+./quant_engine --live --paper-orders --model ../models/ensemble_model.weights --trades out/live_trades.csv
+# or in Docker, running until stopped (restarts by itself after a crash or VM reboot):
 docker run -d --name quant-live --restart unless-stopped --cpus=2 --memory=1g --user "$(id -u):$(id -g)" \
   -e APCA_API_KEY_ID -e APCA_API_SECRET_KEY -v "$PWD/models:/app/models:ro" -v "$PWD/out:/app/out" \
-  quant-engine --live --model /app/models/ensemble_model.weights --trades /app/out/live_trades.csv
+  quant-engine --live --paper-orders --model /app/models/ensemble_model.weights --trades /app/out/live_trades.csv \
+  --online-lr 0.001 --online-state /app/out/online_state.weights      # only if walk-forward chose it
 docker logs -f quant-live                     # one status line per 5-minute bar
-docker stop quant-live                        # flattens the paper positions and prints the report
+docker stop -t 30 quant-live                  # flattens (if the market is open) and prints the report
+python python/paper_report.py out/account.csv # Sharpe, drawdown and P&L of the paper account
 ```
 
 How it runs: it asks Alpaca's market clock whether the market is open (holidays and early
@@ -106,7 +108,26 @@ closes included) and sleeps until the next open when it is not. At start-up it f
 bars and quotes over one WebSocket and builds each 5-minute bar, acting on it as soon as it
 is complete. Data is pushed by Alpaca, so nothing polls and no bar is processed twice; after
 a dropped connection it reconnects and fills any missed bars from REST. Idle it uses ~0.1% of
-a core and ~21 MB of memory. Trades are simulated by the engine (paper), not sent to Alpaca.
+a core and ~21 MB of memory.
+
+Paper orders (`--paper-orders`): after every bar a separate thread makes the paper account's
+positions in the configured tickers equal the engine's (whole shares, sized for $10k of the
+account): it reads the positions, cancels open orders and sends market orders for the
+differences; a long is closed before a short is opened (Alpaca rejects flips). The account is
+the source of truth, so restarts and partial fills converge on the next bar. It only trades
+while the market is open, only touches its own tickers, and refuses any trading URL other than
+`https://paper-api.alpaca.markets`. Every order is logged in `orders.csv`, the account equity
+and positions after each bar in `account.csv` (next to `--trades`). The engine's own simulated
+trades stay in `--trades`; differences between the two are fill timing and price.
+
+Online learning (`--online-lr`, off by default): six bars after each prediction its label is
+known (same rule as the training data); the model then takes one small gradient step on its
+output layer and calibration, pulled back towards the trained weights (`--online-anchor`), so
+it keeps adapting to recent days without drifting far on noise. The GRUs themselves stay fixed;
+full retraining stays offline. `--online-state` saves what was learned (hourly and at exit) and
+restores it on restart, only for the same model file. Choose the rate by walk-forward
+(`compare_methods.py --online-lrs 0 0.001 0.003`): on synthetic data 0.001 helped and 0.01+
+hurt, because large steps chase noise.
 
 Feeds: Alpaca's free plan streams real-time data from IEX only (`--feed iex`, default); IEX
 volume is a few percent of the whole market, so for live use train on IEX bars too

@@ -453,6 +453,57 @@ static void test_native_gru(const std::string& fixture_dir) {
     bool threw = false;
     try { NativeModel::load(fixture_dir + "/feature_parity_config.txt"); } catch (const std::exception&) { threw = true; }
     CHECK(threw, "non-model file is rejected");
+
+    // Online learning: 24 updates (label = case % 3) must land where PyTorch's autograd does
+    std::ifstream oc(fixture_dir + "/gru_online_expected.csv");
+    if (!oc) {
+        std::cout << "  [SKIP] gru_online_expected.csv not found\n";
+        return;
+    }
+    std::vector<std::array<double, 3>> want;
+    while (std::getline(oc, line)) {
+        if (line.empty() || line[0] == '#' || line.rfind("model,", 0) == 0) continue;
+        auto c = split_csv(line);
+        want.push_back({std::stod(c[2]), std::stod(c[3]), std::stod(c[4])});
+    }
+    const std::string base_path = fixture_dir + "/gru_parity_mean.weights";
+    NativeModel m = NativeModel::load(base_path);
+    const NativeModel base = NativeModel::load(base_path);
+    std::vector<float> z(m.z_size());
+    float before[3], p[3];
+    m.predict(x.data(), seq_len, input_dim, before);
+    for (int i = 0; i < cases; ++i) {
+        m.predict(x.data() + static_cast<size_t>(i) * seq_len * input_dim, seq_len, input_dim, p, z.data());
+        m.learn(z.data(), i % 3, 0.05f, 0.1f);
+    }
+    double max_err = 0.0, moved = 0.0;
+    for (int i = 0; i < cases; ++i) {
+        m.predict(x.data() + static_cast<size_t>(i) * seq_len * input_dim, seq_len, input_dim, p);
+        for (int k = 0; k < 3; ++k) max_err = std::max(max_err, std::abs(p[k] - want[i][k]));
+        if (i == 0) for (int k = 0; k < 3; ++k) moved = std::max(moved, static_cast<double>(std::abs(p[k] - before[k])));
+    }
+    std::cout << "    online learning: max |p_cpp - p_torch| " << max_err << " after 24 updates (outputs moved by up to "
+              << moved << ")\n";
+    CHECK(static_cast<int>(want.size()) == cases && max_err < 2e-5 && moved > 1e-3, "online learning matches PyTorch autograd");
+
+    // Persisting the adapted model and adopting it into a fresh copy of the base reproduces it
+    const std::string state_path = "engine_tests_online_state.weights";
+    m.save(state_path);
+    NativeModel restored = NativeModel::load(base_path);
+    const bool adopted = restored.adopt(NativeModel::load(state_path));
+    double max_diff = 0.0;
+    for (int i = 0; i < cases; ++i) {
+        float a[3], b[3];
+        m.predict(x.data() + static_cast<size_t>(i) * seq_len * input_dim, seq_len, input_dim, a);
+        restored.predict(x.data() + static_cast<size_t>(i) * seq_len * input_dim, seq_len, input_dim, b);
+        for (int k = 0; k < 3; ++k) max_diff = std::max(max_diff, static_cast<double>(std::abs(a[k] - b[k])));
+    }
+    CHECK(adopted && max_diff == 0.0, "saved online state restores exactly");
+    CHECK(base.fingerprint() == NativeModel::load(base_path).fingerprint() &&
+              base.fingerprint() != NativeModel::load(state_path).fingerprint(),
+          "fingerprint identifies the base model");
+    CHECK(!restored.adopt(NativeModel::load(fixture_dir + "/gru_parity_single.weights")), "state of another model is refused");
+    std::remove(state_path.c_str());
 }
 
 // Live feed pieces that need no network: JSON, time, 1m -> 5m aggregation, features

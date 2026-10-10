@@ -30,6 +30,7 @@ import polars as pl
 import torch
 import torch.nn as nn
 
+from bar_schema import FEE_HURDLE_PCT, LABEL_HORIZON
 from native_model import write_native
 from quantum_features import N_CLASSICAL, FeatureConfig, classical_features, model_inputs
 
@@ -315,7 +316,7 @@ def train_and_export(val_ts=None, test_ts=None, seeds=SEEDS):
     if not val_ts <= test_ts:
         raise SystemExit("[-] --val-start must not be after --test-start")
 
-    base_cfg = FeatureConfig(val_start_ts=val_ts, test_start_ts=test_ts)
+    base_cfg = FeatureConfig(val_start_ts=val_ts, test_start_ts=test_ts, label_horizon=LABEL_HORIZON, label_hurdle=FEE_HURDLE_PCT)
     horizon = base_cfg.label_horizon
     train_ts = timeline[timeline < val_ts]
     inner_ts = int(train_ts[int(len(train_ts) * (1.0 - INNER_FRAC))])

@@ -125,6 +125,12 @@ public:
         return it == positions_.end() ? 0 : it->second.direction();
     }
 
+    // Signed position size in shares (fractional in the simulation)
+    double units(const std::string& ticker) const {
+        auto it = positions_.find(ticker);
+        return it == positions_.end() ? 0.0 : it->second.units;
+    }
+
     // Expected one-way cost of trading this ticker, as a fraction of notional
     double one_way_cost(const std::string& ticker) const {
         auto it = positions_.find(ticker);

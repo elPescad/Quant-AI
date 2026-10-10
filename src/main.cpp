@@ -16,6 +16,7 @@
 #include <chrono>
 #include <climits>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -39,6 +40,7 @@
 #include "ring_buffer.hpp"
 #ifdef QUANT_LIVE
 #include "live_feed.hpp"
+#include "paper_broker.hpp"
 #endif
 
 namespace {
@@ -57,10 +59,14 @@ struct EngineOptions {
     int max_positions = 4;
     double risk_aversion = 100.0;
     double fee_bps = 0.2; // Per fill
+    double online_lr = 0.0;     // > 0: learn from each bar once its label is known
+    double online_anchor = 0.1; // pull towards the trained weights
+    std::string online_state;   // file that carries the learned adjustments across restarts
     bool verify_qubo = false;
     bool verbose = false;
     // Live mode (Alpaca)
     bool live = false;
+    bool paper_orders = false; // mirror positions into the Alpaca paper account
     int live_check = 0; // seconds; > 0 = connectivity check only
     std::string feed = "iex";
     std::string symbols = "SPY,QQQ,AAPL,NVDA,MSFT,AMD";
@@ -81,6 +87,9 @@ void usage() {
                  "  --risk-aversion X      QUBO risk aversion gamma (default 100)\n"
                  "  --max-positions K      max simultaneous positions (default 4)\n"
                  "  --fee-bps X            fees per fill in basis points (default 0.2)\n"
+                 "  --online-lr X          online learning rate for the model head (default 0 = off)\n"
+                 "  --online-anchor X      pull of the learned head towards the trained one (default 0.1)\n"
+                 "  --online-state PATH    save/restore what online learning learned (only for the same model)\n"
                  "  --verify-qubo          check every SA solution against brute force\n"
                  "  --trades PATH          trade log (default trades.csv)\n"
                  "  --verbose              per-bar debug output\n";
@@ -89,6 +98,8 @@ void usage() {
                  "Live paper trading on Alpaca market data (keys in APCA_API_KEY_ID / APCA_API_SECRET_KEY):\n"
                  "  --live                 stream live bars and trade them; sleeps while the market is closed\n"
                  "  --live-check [SECS]    test the clock, REST and stream connections, then exit (default 20 s)\n"
+                 "  --paper-orders         with --live: place the positions in your Alpaca paper account too\n"
+                 "                         (orders.csv / account.csv next to --trades)\n"
                  "  --feed iex|sip         Alpaca data feed (default iex = free plan; sip needs a paid plan)\n"
                  "  --symbols A,B,...      tickers (default SPY,QQQ,AAPL,NVDA,MSFT,AMD)\n"
                  "  --warmup-days N        history fetched at start-up to warm the features (default 30)\n"
@@ -115,9 +126,13 @@ bool parse_args(int argc, char** argv, EngineOptions& o) {
         else if (a == "--max-positions") o.max_positions = std::stoi(next());
         else if (a == "--risk-aversion") o.risk_aversion = std::stod(next());
         else if (a == "--fee-bps") o.fee_bps = std::stod(next());
+        else if (a == "--online-lr") o.online_lr = std::stod(next());
+        else if (a == "--online-anchor") o.online_anchor = std::stod(next());
+        else if (a == "--online-state") o.online_state = next();
         else if (a == "--verify-qubo") o.verify_qubo = true;
         else if (a == "--verbose") o.verbose = true;
         else if (a == "--live") o.live = true;
+        else if (a == "--paper-orders") o.paper_orders = true;
         else if (a == "--live-check") o.live_check = (i + 1 < argc && argv[i + 1][0] != '-') ? std::stoi(next()) : 20;
         else if (a == "--feed") o.feed = next();
         else if (a == "--symbols") o.symbols = next();
@@ -275,6 +290,14 @@ struct TickerState {
     double last_price = 0.0;
     double prev_bar_price = 0.0;
     bool seen_this_bar = false;
+
+    // Online learning: the last label_horizon bars, waiting for their labels
+    struct Pending {
+        float price = 0.0f;
+        bool valid = false;
+        std::vector<float> z; // head inputs of every net at prediction time
+    };
+    std::deque<Pending> pending;
 };
 
 struct EngineStats {
@@ -322,6 +345,8 @@ public:
             if (bar_ts_ != INT64_MIN && !bar_closed_) close_bar();
             portfolio_.liquidate_all(last_tick_id_);
         }
+        send_targets(); // flat
+        save_online_state();
     }
 
     void report(double wall_sec) const {
@@ -349,6 +374,10 @@ public:
                           << std::setprecision(6) << s.max_energy_gap << std::setprecision(2) << "\n";
             }
         }
+
+        if (online())
+            std::cout << "Online Learning:       " << online_updates_ << " updates (lr " << std::defaultfloat << opt_.online_lr
+                      << ", anchor " << opt_.online_anchor << std::fixed << ")" << (opt_.online_state.empty() ? "" : ", state in " + opt_.online_state) << "\n";
 
         std::cout << "\n==================================================\n"
                   << "     AR(1) ORDER-FLOW PERSISTENCE (RLS estimate)\n"
@@ -391,6 +420,10 @@ public:
         trade_start_ = start;
         trade_end_ = end;
     }
+
+#ifdef QUANT_LIVE
+    void set_broker(PaperBroker* broker) { broker_ = broker; }
+#endif
 
 private:
     static PortfolioParams make_portfolio_params(const EngineOptions& o) {
@@ -463,18 +496,85 @@ private:
             st.cooldown_until = bar_index_ + COOLDOWN_BARS;
         }
 
-        if (ready && trading_now()) {
+        if (!trading_now()) return;
+        if (online()) learn_matured(st, tick.raw_price);
+        TickerState::Pending entry;
+        if (ready) {
             st.pipeline.copy_window(window_.data());
+            if (online()) entry.z.resize(model_.z_size());
             float p[3];
             auto t2 = std::chrono::steady_clock::now();
-            model_.predict(window_.data(), cfg_.seq_len, cfg_.input_dim(), p);
+            model_.predict(window_.data(), cfg_.seq_len, cfg_.input_dim(), p, online() ? entry.z.data() : nullptr);
             auto t3 = std::chrono::steady_clock::now();
             stats_.model_us.add(std::chrono::duration<double, std::micro>(t3 - t2).count());
 
             st.edge = static_cast<double>(p[2]) - static_cast<double>(p[0]);
             st.signal_bar = bar_index_;
+            entry.valid = true;
+        }
+        if (online()) {
+            entry.price = tick.raw_price;
+            st.pending.push_back(std::move(entry));
         }
     }
+
+    bool online() const { return opt_.online_lr > 0.0; }
+
+    // Simulated positions as whole shares (toward zero) for the paper account
+    void send_targets() {
+#ifdef QUANT_LIVE
+        if (!broker_) return;
+        PaperBroker::Targets t;
+        for (const auto& name : asset_names_) t[name] = static_cast<long>(std::trunc(portfolio_.units(name)));
+        broker_->submit(std::move(t), bar_ts_);
+#endif
+    }
+
+    // The prediction made label_horizon bars ago now has its label (same rule as the training
+    // data): learn from it before predicting this bar
+    void learn_matured(TickerState& st, float price) {
+        if (static_cast<int>(st.pending.size()) < cfg_.label_horizon) return;
+        const TickerState::Pending& old = st.pending.front();
+        if (old.valid && old.price > 0.0f && price > 0.0f) {
+            const double ret = static_cast<double>(price) / old.price - 1.0;
+            const int label = ret > cfg_.label_hurdle ? 2 : (ret < -cfg_.label_hurdle ? 0 : 1);
+            model_.learn(old.z.data(), label, static_cast<float>(opt_.online_lr), static_cast<float>(opt_.online_anchor));
+            online_updates_++;
+        }
+        st.pending.pop_front();
+    }
+
+public:
+    // Adopt a saved online-learning state if it was learned on this very model
+    void resume_online_state() {
+        if (opt_.online_state.empty()) return;
+        std::ifstream meta(opt_.online_state + ".base");
+        unsigned long long fp = 0;
+        long updates = 0;
+        if (!meta || !(meta >> std::hex >> fp >> std::dec >> updates)) {
+            std::cout << "[+] Online learning starts fresh (no state in " << opt_.online_state << ")" << std::endl;
+            return;
+        }
+        if (fp != model_.fingerprint() || !model_.adopt(NativeModel::load(opt_.online_state))) {
+            std::cout << "[!] " << opt_.online_state << " was learned on a different model; starting fresh" << std::endl;
+            return;
+        }
+        online_updates_ = updates;
+        std::cout << "[+] Resumed online learning state (" << updates << " updates) from " << opt_.online_state << std::endl;
+    }
+
+    void save_online_state() const {
+        if (!online() || opt_.online_state.empty()) return;
+        try {
+            model_.save(opt_.online_state);
+            std::ofstream meta(opt_.online_state + ".base", std::ios::trunc);
+            meta << std::hex << model_.fingerprint() << " " << std::dec << online_updates_ << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "[!] Could not save online state: " << e.what() << std::endl;
+        }
+    }
+
+private:
 
     void close_bar() {
         // 1. Risk model: 1-bar returns of every ticker that printed in this bar
@@ -530,6 +630,11 @@ private:
             auto t1 = std::chrono::steady_clock::now();
             if (!views.empty()) stats_.alloc_us.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
             portfolio_.record_equity();
+            send_targets();
+            if (opt_.live && online() && ++bars_since_save_ >= 12) { // hourly
+                save_online_state();
+                bars_since_save_ = 0;
+            }
             if (opt_.live) {
                 int open = 0;
                 for (const auto& name : asset_names_) open += portfolio_.direction(name) != 0;
@@ -573,6 +678,11 @@ private:
     int64_t trade_end_ = INT64_MAX;
     bool done_trading_ = false;
     bool bar_closed_ = false; // the current bar was already closed by an end-of-bar marker
+    long online_updates_ = 0;
+    int bars_since_save_ = 0;
+#ifdef QUANT_LIVE
+    PaperBroker* broker_ = nullptr;
+#endif
     EngineStats stats_;
 };
 
@@ -641,6 +751,27 @@ int main(int argc, char** argv) {
 
     Engine engine(opt, cfg, module);
     engine.set_window(start, end);
+    if (opt.online_lr > 0.0) engine.resume_online_state();
+#ifdef QUANT_LIVE
+    std::unique_ptr<PaperBroker> broker;
+    if (opt.paper_orders) {
+        if (!opt.live) {
+            std::cerr << "[-] --paper-orders needs --live" << std::endl;
+            return 1;
+        }
+        const LiveConfig lc = make_live_config(opt);
+        const size_t slash = opt.trades_path.find_last_of('/');
+        try {
+            broker = std::make_unique<PaperBroker>(lc.trading_url, lc.key, lc.secret, lc.symbols,
+                                                   slash == std::string::npos ? "." : opt.trades_path.substr(0, slash));
+        } catch (const std::exception& e) {
+            std::cerr << "[-] " << e.what() << std::endl;
+            return 1;
+        }
+        engine.set_broker(broker.get());
+        std::cout << "[+] Paper orders on " << lc.trading_url << " for " << opt.symbols << std::endl;
+    }
+#endif
 
     auto wall_start = std::chrono::steady_clock::now();
     std::signal(SIGINT, request_stop);
@@ -655,6 +786,9 @@ int main(int argc, char** argv) {
     pin_thread_to_core(consumer, static_cast<int>(std::thread::hardware_concurrency()) - 1);
     producer.join();
     consumer.join();
+#ifdef QUANT_LIVE
+    if (broker) broker->finish();
+#endif
     double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
 
     engine.report(wall);

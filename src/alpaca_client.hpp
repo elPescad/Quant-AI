@@ -24,7 +24,9 @@ public:
     ~CurlGlobal() { curl_global_cleanup(); }
 };
 
-inline HttpResponse http_get(const std::string& url, const std::vector<std::string>& headers, long timeout_s = 20) {
+// method: GET, POST (body sent as JSON) or DELETE
+inline HttpResponse http_request(const std::string& method, const std::string& url, const std::vector<std::string>& headers,
+                                 const std::string& body = "", long timeout_s = 20) {
     HttpResponse r;
     CURL* c = curl_easy_init();
     if (!c) {
@@ -37,6 +39,13 @@ inline HttpResponse http_get(const std::string& url, const std::vector<std::stri
         static_cast<std::string*>(out)->append(p, size * n);
         return size * n;
     };
+    if (method == "POST") {
+        hl = curl_slist_append(hl, "Content-Type: application/json");
+        curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+    } else if (method != "GET") {
+        curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method.c_str());
+    }
     curl_easy_setopt(c, CURLOPT_URL, url.c_str());
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, hl);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, sink);
@@ -49,6 +58,10 @@ inline HttpResponse http_get(const std::string& url, const std::vector<std::stri
     curl_slist_free_all(hl);
     curl_easy_cleanup(c);
     return r;
+}
+
+inline HttpResponse http_get(const std::string& url, const std::vector<std::string>& headers, long timeout_s = 20) {
+    return http_request("GET", url, headers, "", timeout_s);
 }
 
 class WebSocket {

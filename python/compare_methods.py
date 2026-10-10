@@ -12,7 +12,8 @@ configuration that looks great in one window only does not win. The selected can
 and every other for reference, then trades the untouched test period once, with models
 retrained on all pre-test data.
 
-Candidates: model x QUBO risk aversion gamma (gamma 0 == greedy), where model is
+Candidates: model x QUBO risk aversion gamma (gamma 0 == greedy) [x online learning rate,
+with --online-lrs], where model is
     quantum       quantum GRU alone
     ensemble      average of quantum and raw GRU probabilities
     q_veto        quantum GRU; HOLD when the raw GRU points the other way
@@ -68,12 +69,19 @@ def train(data, model_dir, val_start, test_start, log, seeds):
         sys.exit(f"[-] training failed, see {log}")
 
 
-def backtest(engine, data, model_dir, feats, gamma, start, end, log):
+def log_name(c):
+    """bt_<model>_g<gamma>[_lr<online lr>]: the name sanity_check.py looks for"""
+    return f"bt_{c[0]}_g{c[1]:g}" + (f"_lr{c[2]:g}" if c[2] > 0 else "")
+
+
+def backtest(engine, data, model_dir, feats, gamma, online_lr, start, end, log):
     cmd = [str(engine), "--data", str(data), "--model", str(model_dir / f"{MODELS[feats]}.weights"),
            "--start-ts", str(start), "--trades", str(log.with_suffix(".trades.csv"))]
     if end is not None:
         cmd += ["--end-ts", str(end)]
     cmd += ["--allocator", "greedy"] if gamma == 0 else ["--allocator", "qubo", "--risk-aversion", str(gamma)]
+    if online_lr > 0:
+        cmd += ["--online-lr", str(online_lr)]
     out = subprocess.run(cmd, capture_output=True, text=True)
     log.write_text(out.stdout + out.stderr)
     if out.returncode != 0:
@@ -120,8 +128,8 @@ def model_runner(runner, data, model, period):
 def run_all(jobs, engine, data, model_dir, candidates, start, end, logdir):
     logdir.mkdir(parents=True, exist_ok=True)
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = {c: pool.submit(backtest, engine, data, model_dir, c[0], c[1], start, end,
-                                  logdir / f"bt_{c[0]}_g{c[1]:g}.log") for c in candidates}
+        futures = {c: pool.submit(backtest, engine, data, model_dir, c[0], c[1], c[2], start, end,
+                                  logdir / f"{log_name(c)}.log") for c in candidates}
         return {c: f.result() for c, f in futures.items()}
 
 
@@ -134,6 +142,8 @@ def main():
     p.add_argument("--folds", type=int, default=3)
     p.add_argument("--seeds", type=int, default=5, help="random starts per GRU, averaged (passed to training)")
     p.add_argument("--gammas", type=float, nargs="+", default=[0.0, 25.0, 100.0], help="QUBO risk aversion grid (0 = greedy)")
+    p.add_argument("--online-lrs", type=float, nargs="+", default=[0.0],
+                   help="online learning rates to compare, e.g. 0 0.001 0.003 (0 = off; no retraining needed)")
     p.add_argument("--min-trades", type=float, default=5.0, help="minimum average round trips per fold to be selectable")
     p.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1), help="parallel backtests")
     p.add_argument("--skip-train", action="store_true", help="reuse models already in <workdir>")
@@ -149,9 +159,9 @@ def main():
     pre = timeline[timeline < test_start]
     first = int(len(pre) * (1 - WALK_FORWARD_FRAC))
     edges = [int(pre[first + (len(pre) - first) * k // a.folds]) for k in range(a.folds)] + [test_start]
-    candidates = [(f, g) for f in MODELS for g in a.gammas]
+    candidates = [(f, g, lr) for f in MODELS for g in a.gammas for lr in a.online_lrs]
     print(f"[+] {len(timeline)} bars | {a.folds} walk-forward folds from {edges[0]} | test from {test_start}")
-    print(f"[+] {len(candidates)} candidates: {', '.join(MODELS)} x gamma {a.gammas}")
+    print(f"[+] {len(candidates)} candidates: {', '.join(MODELS)} x gamma {a.gammas} x online lr {a.online_lrs}")
 
     fold_results = []
     for k in range(a.folds):
@@ -181,20 +191,20 @@ def main():
 
     with (workdir / "results.csv").open("w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["model", "gamma", *[f"fold{k + 1}_sharpe" for k in range(a.folds)], "wf_mean", "wf_se", "wf_score",
+        w.writerow(["model", "gamma", "online_lr", *[f"fold{k + 1}_sharpe" for k in range(a.folds)], "wf_mean", "wf_se", "wf_score",
                     "wf_trades_per_fold", "wf_long_pnl", "wf_short_pnl", *[f"test_{m}" for m in METRICS],
                     "test_long_pnl", "test_short_pnl", "selected"])
         for c in candidates:
             s, t = summary[c], test[c]
-            w.writerow([c[0], c[1], *s["sharpes"], s["mean"], s["se"], s["score"], s["trades"], s["long"], s["short"],
+            w.writerow([c[0], c[1], c[2], *s["sharpes"], s["mean"], s["se"], s["score"], s["trades"], s["long"], s["short"],
                         *[t[m] for m in METRICS], t["long_pnl"], t["short_pnl"], c == chosen])
 
     print(f"\nResults for {data.name}: walk-forward ({a.folds} folds) vs held-out test, ranked by WF score = mean - SE")
-    print(f"{'':<2}{'model':<14}{'gamma':>6}{'WF Sharpe':>16}{'folds>0':>9}{'trips/fold':>11}{'WF long $':>11}{'WF short $':>11}"
+    print(f"{'':<2}{'model':<14}{'gamma':>6}{'lr':>7}{'WF Sharpe':>16}{'folds>0':>9}{'trips/fold':>11}{'WF long $':>11}{'WF short $':>11}"
           f"{'test Sharpe':>13}{'test ret %':>11}{'trips':>7}{'long $':>9}{'short $':>9}")
     for c in sorted(candidates, key=lambda c: summary[c]["score"], reverse=True):
         s, t = summary[c], test[c]
-        print(f"{'*' if c == chosen else '':<2}{c[0]:<14}{c[1]:>6g}{s['mean']:>9.2f} ± {s['se']:<4.2f}"
+        print(f"{'*' if c == chosen else '':<2}{c[0]:<14}{c[1]:>6g}{c[2]:>7g}{s['mean']:>9.2f} ± {s['se']:<4.2f}"
               f"{sum(x > 0 for x in s['sharpes']):>6}/{a.folds}{s['trades']:>11.1f}{s['long']:>11.2f}{s['short']:>11.2f}"
               f"{t['sharpe']:>13.2f}{t['return_pct']:>11.2f}{t['round_trips']:>7.0f}{t['long_pnl']:>9.2f}{t['short_pnl']:>9.2f}")
     print("(long $ / short $: gross P&L of closed long / short round trips on $10k; WF columns sum all folds)")
@@ -210,7 +220,7 @@ def main():
             inside = abs(t["sharpe"] - s["mean"]) <= 2 * max(s["se"], 1e-9) * a.folds ** 0.5
             verdict = (f"{'POSITIVE' if t['sharpe'] > 0 else 'NEGATIVE'}; "
                        f"{'within' if inside else 'outside'} the fold-to-fold range of ±2 sd")
-        print(f"\nSelected: {chosen[0]}, gamma {chosen[1]:g} | WF Sharpe {s['mean']:.2f} ± {s['se']:.2f} "
+        print(f"\nSelected: {chosen[0]}, gamma {chosen[1]:g}, online lr {chosen[2]:g} | WF Sharpe {s['mean']:.2f} ± {s['se']:.2f} "
               f"-> test Sharpe {t['sharpe']:.2f} ({verdict})")
 
     runner = a.runner.resolve()
