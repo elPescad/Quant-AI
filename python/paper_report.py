@@ -35,12 +35,13 @@ def main():
     ret = pnl / a.capital
     n = len(ret)
     sharpe = ret.mean() / ret.std(ddof=1) * math.sqrt(252) if n > 1 and ret.std(ddof=1) > 0 else float("nan")
-    curve = a.capital + pnl.cumsum()
+    curve = pd.concat([pd.Series([a.capital]), a.capital + pnl.cumsum()])  # from the starting capital
     drawdown = (curve / curve.cummax() - 1).min()
     se = math.sqrt(252 / n) if n else float("nan")
 
     print(f"Paper account: {daily.index[0]} .. {daily.index[-1]} ({n} trading days with a prior day)")
-    print(f"  P&L                 ${pnl.sum():,.2f} ({100 * pnl.sum() / a.capital:+.2f}% of ${a.capital:,.0f})")
+    total = df["equity"].iloc[-1] - df["equity"].iloc[0]  # from the first snapshot, like the engine's status summary
+    print(f"  P&L                 ${total:,.2f} ({100 * total / a.capital:+.2f}% of ${a.capital:,.0f})")
     print(f"  daily mean / sd     {100 * ret.mean():+.3f}% / {100 * ret.std(ddof=1):.3f}%")
     print(f"  Sharpe (ann.)       {sharpe:.2f}  (standard error {se:.2f} after {n} days: within +/-{2 * se:.1f} of zero is "
           f"indistinguishable from luck)")

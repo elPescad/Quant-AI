@@ -97,10 +97,39 @@ docker run -d --name quant-live --restart unless-stopped --cpus=2 --memory=1g --
   -e APCA_API_KEY_ID -e APCA_API_SECRET_KEY -v "$PWD/models:/app/models:ro" -v "$PWD/out:/app/out" \
   quant-engine --live --paper-orders --model /app/models/ensemble_model.weights --trades /app/out/live_trades.csv \
   --online-lr 0.001 --online-state /app/out/online_state.weights      # only if walk-forward chose it
-docker logs -f quant-live                     # one status line per 5-minute bar
+docker logs -f quant-live                     # a line per 5-minute bar and a summary every 5 minutes
 docker stop -t 30 quant-live                  # flattens (if the market is open) and prints the report
 python python/paper_report.py out/account.csv # Sharpe, drawdown and P&L of the paper account
 ```
+
+Status summary (`--status-every 300` by default in live mode, `0` turns it off): every five
+minutes while the market is open, once more at the close, and a one-line heartbeat every hour
+while it is closed:
+
+```
+========== STATUS 2026-10-12 15:57 New York | market open until 16:00 ==========
+Engine (simulated $10k account, this run since 10-12 09:25; 77 bars traded, last 10-12 15:50)
+  Equity        $10,016.68 | P&L +$16.68 (+0.17%) | today +$16.68
+  Round trips   28: 13 won +$80.06, 15 lost -$63.85 | win rate 46.4% | avg win +$6.16, avg loss -$4.26
+  Open          2 position(s), unrealised +$0.68: SPY long 3.3 @ 748.69 now 749.72; NVDA short 12.3 @ 203.36 now 203.35
+  Risk, costs   max drawdown 0.57% | avg gross exposure 77% | fees $3.00
+  Sharpe        4.93 annualised, +/- 15.98 after 77 bars (within 2x the +/- of 0 = indistinguishable from luck)
+  Strategy      greedy allocator (= QUBO at gamma 0), max 4 positions, ensemble_model.weights
+  Model         buy/sell calls right 49.5% of 426 (vs the price 30 min later) | online learning 426 updates, lr 0.0010
+Paper account (Alpaca, all runs in account.csv, since 2026-10-05, 6 trading days)
+  Equity        $100,231.04, total +$231.04 (+2.31% of $10k) | today +$15.90
+  Daily Sharpe  2.10, +/- 7.10 after 5 daily changes | max drawdown 0.80% (daily closes)
+  Orders        42 accepted, 0 failed this run (orders.csv)
+```
+
+The engine block restarts with every run (a restart or a new model); the paper account block
+reads `account.csv` back, so it covers the whole experiment. The `+/-` is the standard error of
+the Sharpe ratio: it shrinks with the square root of time (about +/- 2.5 after two months), and
+until the Sharpe is more than twice it the result is not distinguishable from luck. "Buy/sell
+calls right" is how often the model's most likely class (buy or sell) matched the price move 30
+minutes later; 50% is a coin flip, and the model only needs to be right often enough to beat the
+spread on the trades it takes. The live trade log is appended to across restarts and records
+each fill's bar time (`bar_ts`).
 
 How it runs: it asks Alpaca's market clock whether the market is open (holidays and early
 closes included) and sleeps until the next open when it is not. At start-up it fetches
@@ -129,6 +158,48 @@ restores it on restart, only for the same model file. Choose the rate by walk-fo
 (`compare_methods.py --online-lrs 0 0.001 0.003`): on synthetic data 0.001 helped and 0.01+
 hurt, because large steps chase noise.
 
+### Deploying to a GCP VM
+
+Train on your own machine, then upload: the 1 GB VM runs the C++ engine (~21 MB) comfortably,
+but not PyTorch training, and training would compete with the live engine for the CPU. Nothing
+is trained on the VM; online learning (if enabled) adjusts the model's output layer there.
+
+Once, on the VM (Debian 12 image; `gcloud compute ssh VM --zone ZONE`):
+
+```bash
+sudo apt-get update && sudo apt-get install -y docker.io
+sudo systemctl enable --now docker          # starts at boot, so the engine survives a VM reboot
+sudo usermod -aG docker "$USER"             # then log out and back in
+mkdir -p ~/quant && nano ~/quant/alpaca.env # two lines: APCA_API_KEY_ID=PK...  APCA_API_SECRET_KEY=...
+```
+
+Then, from the repository root on your machine (needs docker and the
+[gcloud CLI](https://cloud.google.com/sdk/docs/install), logged in to your project):
+
+```bash
+deploy/deploy_gcp.sh VM ZONE ensemble_model -- --online-lr 0.001   # model and flags compare_methods.py selected
+gcloud compute ssh VM --zone ZONE --command 'docker logs -f --tail 60 quant-live'
+gcloud compute scp VM:~/quant/out/account.csv out/ --zone ZONE && python python/paper_report.py out/account.csv
+```
+
+`deploy_gcp.sh` builds the image here (compiling and running the engine tests), saves it as a
+compressed tar (~40 MB), copies it with the model to `~/quant/` on the VM and runs
+`deploy/run_live.sh` there, which checks the keys and connections (`--live-check`), stops the
+previous run gracefully and starts `quant-live` with `--restart unless-stopped`, 512 MB of
+memory and rotated logs. The keys stay in `~/quant/alpaca.env` on the VM; the image holds no
+keys, data or models. Results accumulate in `~/quant/out/` (`account.csv`, `orders.csv`,
+`live_trades.csv`, the online learning state).
+
+Retraining: keep the same model for the whole evaluation (the first two months or so). A
+model swapped mid-way restarts the clock, because the live record then mixes two models and
+cannot tell you whether either one works. Online learning keeps adapting to recent days in the
+meantime. After that, retrain about monthly on the most recent data
+(`fetch_alpaca_ticks.py --feed iex`, then `compare_methods.py`, `sanity_check.py`) and swap only
+when the new walk-forward result holds up. Weekly retraining adds a few days to months of data:
+it changes the model mostly by noise and multiplies the chances of fooling yourself. Swap it with
+`MODEL_ONLY=1 deploy/deploy_gcp.sh VM ZONE ...`, ideally when the market is closed; online
+learning then starts fresh for the new model, and `account.csv` keeps the full paper record.
+
 Feeds: Alpaca's free plan streams real-time data from IEX only (`--feed iex`, default); IEX
 volume is a few percent of the whole market, so for live use train on IEX bars too
 (`python python/fetch_alpaca_ticks.py --feed iex --output data/alpaca_iex.csv`). A paid plan
@@ -147,6 +218,7 @@ without it otherwise.
 | `--fee-bps X` | `0.2` | Fees per fill. Alpaca charges no commission; this covers the regulatory fees on sales. |
 | `--verify-qubo` | off | Solve every bar's QUBO by brute force too and report how often SA found the optimum. |
 | `--model`, `--config`, `--data`, `--trades` | | Paths. Default model `../models/ensemble_model.weights`; `--data -` reads ticks from stdin (for a live feed). |
+| `--status-every S` | `300` live, `0` otherwise | Results summary every S seconds while the market is open (hourly heartbeat while closed). |
 
 ## Data format
 

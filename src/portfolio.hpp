@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <limits>
 #include <numeric>
@@ -13,6 +14,7 @@
 struct Position {
     double units = 0.0; // Positive for LONG, negative for SHORT
     double avg_price = 0.0;
+    double entry_fee = 0.0; // charged at the open, counted in the round trip's P&L at the close
     double current_mid_price = 0.0;
     double half_spread_pct = 0.0; // Capped half spread we expect to pay per fill
     double highest_price_since_entry = 0.0;
@@ -36,6 +38,7 @@ struct PortfolioParams {
     double max_raw_spread_pct = 0.01;        // Larger spreads are treated as bad data
     double bars_per_year = 252.0 * 78.0;     // 5-minute bars
     std::string trade_log = "trades.csv";
+    bool append_log = false; // live: keep earlier runs' trades (restarts must not wipe the log)
 };
 
 class PortfolioManager {
@@ -44,8 +47,9 @@ public:
         : p_(p), cash_balance_(p.starting_cash), peak_equity_(p.starting_cash) {
         equity_curve_.reserve(100000);
         if (!p_.trade_log.empty()) {
-            log_file_.open(p_.trade_log);
-            if (log_file_.is_open()) log_file_ << "tick_id,ticker,action,fill_price,units_traded,cash,total_equity\n";
+            log_file_.open(p_.trade_log, p_.append_log ? std::ios::app : std::ios::trunc);
+            if (log_file_.is_open() && log_file_.tellp() == 0)
+                log_file_ << "tick_id,ticker,action,fill_price,units_traded,cash,total_equity,bar_ts\n";
         }
     }
 
@@ -111,6 +115,9 @@ public:
         }
     }
 
+    // Start (unix seconds) of the bar being processed, written to the trade log
+    void set_bar_time(int64_t ts) { bar_ts_ = ts; }
+
     // Call once per bar so the Sharpe ratio is per-bar
     void record_equity() {
         const double eq = get_total_equity();
@@ -123,6 +130,11 @@ public:
     int direction(const std::string& ticker) const {
         auto it = positions_.find(ticker);
         return it == positions_.end() ? 0 : it->second.direction();
+    }
+
+    const Position* position(const std::string& ticker) const {
+        auto it = positions_.find(ticker);
+        return it == positions_.end() || it->second.direction() == 0 ? nullptr : &it->second;
     }
 
     // Signed position size in shares (fractional in the simulation)
@@ -158,6 +170,19 @@ public:
     double get_fees_paid() const { return fees_paid_; }
     double get_avg_gross_exposure() const {
         return equity_curve_.empty() ? 0.0 : 100.0 * gross_exposure_sum_ / equity_curve_.size();
+    }
+
+    int get_winning_trades() const { return winning_trades_; }
+    int get_losing_trades() const { return total_trades_ - winning_trades_; }
+    double get_gains() const { return gains_; }   // Sum of the winning round trips' P&L, net of fees
+    double get_losses() const { return losses_; } // Sum of the losing ones (<= 0)
+    long get_bars_recorded() const { return static_cast<long>(equity_curve_.size()); }
+
+    // Open positions marked at mid, entry costs included
+    double get_unrealized_pnl() const {
+        double u = 0.0;
+        for (const auto& [ticker, pos] : positions_) u += pos.units * (pos.current_mid_price - pos.avg_price);
+        return u;
     }
 
     double get_win_rate() const {
@@ -207,6 +232,7 @@ private:
         if (usd < 10.0) return;
         const double fee = usd * p_.fee_rate;
         fees_paid_ += fee;
+        pos.entry_fee = fee;
         if (dir > 0) {
             const double fill = ask(pos);
             pos.units = usd / fill;
@@ -244,13 +270,20 @@ private:
             cash_balance_ -= gross + fee;
             pnl = units * pos.avg_price - gross - fee;
         }
+        pnl -= pos.entry_fee; // round trip net of both fees, so gains + losses = realised P&L
         pos.units = 0.0;
+        pos.entry_fee = 0.0;
         pos.avg_price = 0.0;
         pos.highest_price_since_entry = 0.0;
         pos.lowest_price_since_entry = std::numeric_limits<double>::max();
 
         total_trades_++;
-        if (pnl > 0.0) winning_trades_++;
+        if (pnl > 0.0) {
+            winning_trades_++;
+            gains_ += pnl;
+        } else {
+            losses_ += pnl;
+        }
         if (std::string(reason).find("STOP") != std::string::npos || std::string(reason).find("TAKE_PROFIT") != std::string::npos) {
             risk_exits_++;
         }
@@ -261,7 +294,7 @@ private:
     void log_trade(int tick_id, const std::string& ticker, const char* action, double units, double price) {
         if (log_file_.is_open()) {
             log_file_ << tick_id << "," << ticker << "," << action << "," << price << "," << units << ","
-                      << cash_balance_ << "," << get_total_equity() << std::endl; // flushed: survives a crash or kill
+                      << cash_balance_ << "," << get_total_equity() << "," << bar_ts_ << std::endl; // flushed: survives a crash or kill
         }
     }
 
@@ -277,6 +310,9 @@ private:
     int total_trades_ = 0;
     int winning_trades_ = 0;
     int risk_exits_ = 0;
+    double gains_ = 0.0;
+    double losses_ = 0.0;
+    int64_t bar_ts_ = 0;
     std::vector<double> equity_curve_;
     std::ofstream log_file_;
 };

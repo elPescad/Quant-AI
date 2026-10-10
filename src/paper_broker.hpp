@@ -11,13 +11,18 @@
 // of truth, so restarts, partial fills and rejected orders all converge on the next bar.
 // Only the configured symbols are touched, only while the market is open, and only on the
 // paper endpoint (or a local mock): this class refuses any other trading URL.
+// The equity after every bar goes to account.csv; at start-up the earlier rows are read
+// back, so summary() covers the whole paper run across restarts and model swaps.
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cmath>
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -33,6 +38,17 @@ class PaperBroker {
 public:
     using Targets = std::map<std::string, long>;
 
+    struct Summary {
+        int days = 0;           // New York trading days with an equity snapshot
+        double equity = 0.0;    // latest
+        double first_equity = 0.0;
+        double today_pnl = 0.0; // vs the previous day's last snapshot
+        double daily_sharpe = std::numeric_limits<double>::quiet_NaN(); // close-to-close, annualised
+        double max_drawdown_pct = 0.0; // daily closes, % of peak (capital + P&L)
+        int64_t first_time = 0, last_time = 0;
+        long orders_ok = 0, orders_failed = 0; // this run
+    };
+
     PaperBroker(std::string trading_url, std::string key, std::string secret, std::vector<std::string> symbols,
                 const std::string& out_dir)
         : url_(std::move(trading_url)), key_(std::move(key)), secret_(std::move(secret)), symbols_(std::move(symbols)) {
@@ -41,6 +57,7 @@ public:
         orders_.open(out_dir + "/orders.csv", std::ios::app);
         account_.open(out_dir + "/account.csv", std::ios::app);
         if (orders_.tellp() == 0) orders_ << "time,bar,symbol,action,qty,http_status,result" << std::endl;
+        load_history(out_dir + "/account.csv");
         if (account_.tellp() == 0) account_ << "time,bar,equity,cash,positions,targets" << std::endl;
         thread_ = std::thread([this] { loop(); });
     }
@@ -77,7 +94,76 @@ public:
         if (thread_.joinable()) thread_.join();
     }
 
+    // Performance of the paper account; returns are on `capital` (the engine's $10k), which
+    // leaves the Sharpe ratio unchanged
+    Summary summary(double capital) const {
+        std::lock_guard<std::mutex> lock(stat_mu_);
+        Summary s;
+        s.orders_ok = orders_ok_;
+        s.orders_failed = orders_failed_;
+        s.days = static_cast<int>(closes_.size());
+        if (closes_.empty()) return s;
+        s.equity = closes_.back().second;
+        s.first_equity = first_equity_;
+        s.first_time = first_time_;
+        s.last_time = last_time_;
+        s.today_pnl = s.equity - (closes_.size() > 1 ? closes_[closes_.size() - 2].second : first_equity_);
+        double sum = 0.0, sq = 0.0, curve = capital, peak = capital;
+        const size_t n = closes_.size() - 1;
+        for (size_t i = 1; i < closes_.size(); ++i) {
+            const double d = closes_[i].second - closes_[i - 1].second;
+            sum += d;
+            curve += d;
+            peak = std::max(peak, curve);
+            if (peak > 0.0) s.max_drawdown_pct = std::max(s.max_drawdown_pct, 100.0 * (peak - curve) / peak);
+        }
+        if (n > 1) {
+            const double mean = sum / n;
+            for (size_t i = 1; i < closes_.size(); ++i) {
+                const double d = closes_[i].second - closes_[i - 1].second - mean;
+                sq += d * d;
+            }
+            const double sd = std::sqrt(sq / (n - 1));
+            if (sd > 0.0) s.daily_sharpe = mean / sd * std::sqrt(252.0);
+        }
+        return s;
+    }
+
 private:
+    static int64_t ny_day(int64_t t) {
+        const int64_t local = t + live::new_york_offset(t);
+        return local >= 0 ? local / 86400 : (local - 86399) / 86400;
+    }
+
+    void record_equity(int64_t t, double equity) {
+        std::lock_guard<std::mutex> lock(stat_mu_);
+        const int64_t day = ny_day(t);
+        if (closes_.empty() || closes_.back().first != day) closes_.push_back({day, equity});
+        else closes_.back().second = equity;
+        if (first_time_ == 0) {
+            first_time_ = t;
+            first_equity_ = equity;
+        }
+        last_time_ = t;
+    }
+
+    // Earlier runs' snapshots (time is column 1, equity column 3; empty when the request failed)
+    void load_history(const std::string& path) {
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) {
+            const size_t a = line.find(','), b = a == std::string::npos ? a : line.find(',', a + 1);
+            const size_t c = b == std::string::npos ? b : line.find(',', b + 1);
+            if (c == std::string::npos || c == b + 1) continue;
+            const auto t = live::parse_rfc3339(line.substr(0, a));
+            if (!t) continue; // header
+            try {
+                record_equity(*t, std::stod(line.substr(b + 1, c - b - 1)));
+            } catch (const std::exception&) {
+            }
+        }
+    }
+
     std::vector<std::string> headers() const {
         return {"APCA-API-KEY-ID: " + key_, "APCA-API-SECRET-KEY: " + secret_, "Accept: application/json"};
     }
@@ -203,6 +289,7 @@ private:
                 const Json j = Json::parse(r.body);
                 equity = j.text("equity");
                 cash = j.text("cash");
+                record_equity(static_cast<int64_t>(std::time(nullptr)), std::stod(equity));
             } catch (const std::exception&) {
             }
         }
@@ -216,6 +303,7 @@ private:
             if (c == ',' || c == '\n' || c == '\r') c = ' ';
         orders_ << now_str() << "," << (bar ? live::to_rfc3339(bar) : "-") << "," << sym << "," << action << "," << qty << ","
                 << status << "," << clean << std::endl;
+        if (action == "buy" || action == "sell" || action == "close") (status >= 200 && status < 300 ? orders_ok_ : orders_failed_)++;
         if (status >= 300) std::cerr << "[paper] " << action << " " << sym << " failed: HTTP " << status << " " << clean << std::endl;
     }
 
@@ -228,6 +316,12 @@ private:
     int64_t pending_bar_ = 0;
     bool has_pending_ = false;
     bool stopping_ = false;
+    // For summary(), read from the engine thread
+    mutable std::mutex stat_mu_;
+    std::vector<std::pair<int64_t, double>> closes_; // (New York day, last equity that day)
+    double first_equity_ = 0.0;
+    int64_t first_time_ = 0, last_time_ = 0;
+    std::atomic<long> orders_ok_{0}, orders_failed_{0};
     std::thread thread_;
 };
 

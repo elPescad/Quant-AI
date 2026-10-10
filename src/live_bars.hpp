@@ -68,7 +68,7 @@ inline std::string to_rfc3339(int64_t t) {
     const unsigned d = doy - (153 * mp + 2) / 5 + 1;
     const unsigned m = mp < 10 ? mp + 3 : mp - 9;
     const int64_t y = static_cast<int64_t>(yoe) + era * 400 + (m <= 2);
-    char buf[32];
+    char buf[64]; // 20 chars used; sized for the compiler's worst case
     std::snprintf(buf, sizeof(buf), "%04lld-%02u-%02uT%02lld:%02lld:%02lldZ", static_cast<long long>(y), m, d,
                   static_cast<long long>(secs / 3600), static_cast<long long>(secs % 3600 / 60), static_cast<long long>(secs % 60));
     return buf;

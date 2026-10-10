@@ -42,6 +42,14 @@ struct LiveConfig {
     int close_grace_s = 90; // keep streaming this long after the close for the last bar
 };
 
+// What the feed is doing, for the engine's status summary (written by the feed thread)
+struct LiveStatus {
+    enum State : int { Starting, Streaming, Closed, Retrying };
+    std::atomic<int> state{Starting};
+    std::atomic<int64_t> next_open{0}, next_close{0};
+    std::atomic<int64_t> last_bar{0}; // start of the last bar delivered
+};
+
 class LiveFeed {
 public:
     using EmitTick = std::function<void(const MarketTick&)>;
@@ -53,22 +61,32 @@ public:
         if (cfg_.stream_url.empty()) cfg_.stream_url = "wss://stream.data.alpaca.markets/v2/" + cfg_.feed;
     }
 
+    void set_status(LiveStatus* status) { status_ = status; }
+
     void run(const std::atomic<bool>& stop) {
         int backoff_s = 1;
         while (!stop.load()) {
             auto clock = market_clock();
             if (!clock) {
+                set_state(LiveStatus::Retrying);
                 log("market clock unavailable, retrying in " + std::to_string(backoff_s) + " s");
                 sleep_for(backoff_s, stop);
                 backoff_s = std::min(backoff_s * 2, 60);
                 continue;
             }
+            if (status_) {
+                status_->next_open.store(clock->next_open);
+                status_->next_close.store(clock->next_close);
+            }
             if (!clock->is_open) {
+                set_state(LiveStatus::Closed);
                 log("market closed; next open " + live::to_rfc3339(clock->next_open) + ", sleeping");
                 sleep_until(clock->next_open - 60, stop);
                 continue;
             }
+            set_state(LiveStatus::Streaming);
             if (!catch_up() && delivered_ == kNone) {
+                set_state(LiveStatus::Retrying);
                 log("history unavailable, retrying in " + std::to_string(backoff_s) + " s");
                 sleep_for(backoff_s, stop);
                 backoff_s = std::min(backoff_s * 2, 60);
@@ -77,6 +95,7 @@ public:
             if (stream_session(clock->next_close, stop)) {
                 backoff_s = 1;
             } else if (!stop.load()) {
+                set_state(LiveStatus::Retrying);
                 log("stream dropped, reconnecting in " + std::to_string(backoff_s) + " s");
                 sleep_for(backoff_s, stop);
                 backoff_s = std::min(backoff_s * 2, 60);
@@ -126,6 +145,10 @@ private:
     };
 
     static int64_t now() { return static_cast<int64_t>(std::time(nullptr)); }
+
+    void set_state(LiveStatus::State s) {
+        if (status_) status_->state.store(s);
+    }
 
     static void log(const std::string& s) { std::cerr << "[live " << live::to_rfc3339(now()) << "] " << s << std::endl; }
 
@@ -292,6 +315,7 @@ private:
         }
         delivered_ = start;
         emit_bar_end_(start);
+        if (status_) status_->last_bar.store(start);
         return n;
     }
 
@@ -310,6 +334,7 @@ private:
     std::map<std::string, Quote> quotes_;
     int64_t delivered_ = kNone;
     bool stream_overridden_ = false;
+    LiveStatus* status_ = nullptr;
     CurlGlobal curl_global_;
 };
 

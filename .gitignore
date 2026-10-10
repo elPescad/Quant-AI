@@ -28,5 +28,8 @@ models/*.weights
 .clangd
 .cache/
 .DS_Store
+# Alpaca keys for deploy/run_live.sh (only ever on the VM)
+alpaca.env
+
 # Method-comparison runs (models, logs, trade logs)
 runs/

@@ -15,6 +15,8 @@
 #include <ctime>
 #include <chrono>
 #include <climits>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -22,6 +24,7 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -33,6 +36,7 @@
 
 #include "feature_pipeline.hpp"
 #include "latency_stats.hpp"
+#include "live_bars.hpp"
 #include "market_data.hpp"
 #include "native_model.hpp"
 #include "portfolio.hpp"
@@ -64,6 +68,7 @@ struct EngineOptions {
     std::string online_state;   // file that carries the learned adjustments across restarts
     bool verify_qubo = false;
     bool verbose = false;
+    int status_every_s = -1; // periodic summary; -1 = 300 s live, off for backtests
     // Live mode (Alpaca)
     bool live = false;
     bool paper_orders = false; // mirror positions into the Alpaca paper account
@@ -91,7 +96,8 @@ void usage() {
                  "  --online-anchor X      pull of the learned head towards the trained one (default 0.1)\n"
                  "  --online-state PATH    save/restore what online learning learned (only for the same model)\n"
                  "  --verify-qubo          check every SA solution against brute force\n"
-                 "  --trades PATH          trade log (default trades.csv)\n"
+                 "  --trades PATH          trade log (default trades.csv; appended to in live mode)\n"
+                 "  --status-every SECS    print a results summary this often (default 300 live, 0 = off)\n"
                  "  --verbose              per-bar debug output\n";
 #ifdef QUANT_LIVE
     std::cout << "\n"
@@ -131,6 +137,7 @@ bool parse_args(int argc, char** argv, EngineOptions& o) {
         else if (a == "--online-state") o.online_state = next();
         else if (a == "--verify-qubo") o.verify_qubo = true;
         else if (a == "--verbose") o.verbose = true;
+        else if (a == "--status-every") o.status_every_s = std::stoi(next());
         else if (a == "--live") o.live = true;
         else if (a == "--paper-orders") o.paper_orders = true;
         else if (a == "--live-check") o.live_check = (i + 1 < argc && argv[i + 1][0] != '-') ? std::stoi(next()) : 20;
@@ -152,6 +159,7 @@ bool parse_args(int argc, char** argv, EngineOptions& o) {
         o.config_path = (has_ext ? o.model_path.substr(0, dot) : o.model_path) + "_config.txt";
     }
     if (o.allocator != "qubo" && o.allocator != "greedy") throw std::runtime_error("--allocator must be qubo or greedy");
+    if (o.status_every_s < 0) o.status_every_s = o.live ? 300 : 0;
     return true;
 }
 
@@ -160,6 +168,43 @@ std::atomic<bool> stream_finished(false);
 std::atomic<bool> stop_requested(false);
 std::atomic<long> rows_skipped(0);
 WakeSignal consumer_wake;
+#ifdef QUANT_LIVE
+LiveStatus live_status;
+#endif
+
+// "+$1,234.56" / "-$0.42"
+std::string usd(double v, bool sign = false) {
+    const long long cents = std::llround(std::abs(v) * 100.0);
+    std::string whole = std::to_string(cents / 100);
+    for (int i = static_cast<int>(whole.size()) - 3; i > 0; i -= 3) whole.insert(static_cast<size_t>(i), ",");
+    char frac[8];
+    std::snprintf(frac, sizeof(frac), ".%02lld", cents % 100);
+    return std::string(cents && v < 0 ? "-" : (sign ? "+" : "")) + "$" + whole + frac;
+}
+
+std::string num(double v, int decimals, bool sign = false) {
+    if (!std::isfinite(v)) return "n/a";
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), sign ? "%+.*f" : "%.*f", decimals, v);
+    return buf;
+}
+
+// New York wall time, e.g. ny_time(t, "%a %Y-%m-%d %H:%M")
+std::string ny_time(int64_t t, const char* fmt) {
+    const std::time_t local = static_cast<std::time_t>(t + live::new_york_offset(t));
+    std::tm tm{};
+    gmtime_r(&local, &tm);
+    char buf[64];
+    std::strftime(buf, sizeof(buf), fmt, &tm);
+    return buf;
+}
+
+int64_t ny_day(int64_t t) {
+    const int64_t local = t + live::new_york_offset(t);
+    return local >= 0 ? local / 86400 : (local - 86399) / 86400;
+}
+
+int64_t wall_now() { return static_cast<int64_t>(std::time(nullptr)); }
 
 void pin_thread_to_core(std::thread& th, int core_id) {
 #ifdef __linux__
@@ -237,6 +282,7 @@ void live_producer(LiveConfig cfg) {
                       push_tick(copy);
                   },
                   push_bar_end);
+    feed.set_status(&live_status);
     feed.run(stop_requested);
     finish_stream();
 }
@@ -291,11 +337,13 @@ struct TickerState {
     double prev_bar_price = 0.0;
     bool seen_this_bar = false;
 
-    // Online learning: the last label_horizon bars, waiting for their labels
+    // Predictions of the last label_horizon bars, waiting for the price that settles them
+    // (always scored; with online learning also learned from)
     struct Pending {
         float price = 0.0f;
         bool valid = false;
-        std::vector<float> z; // head inputs of every net at prediction time
+        int call = 0;         // the model's most likely class: +1 buy, -1 sell, 0 hold
+        std::vector<float> z; // online learning: head inputs of every net at prediction time
     };
     std::deque<Pending> pending;
 };
@@ -319,7 +367,9 @@ public:
           portfolio_(make_portfolio_params(opt)),
           risk_(0.99),
           allocator_(make_alloc_params(opt, cfg), risk_),
-          window_(static_cast<size_t>(cfg.seq_len) * cfg.input_dim(), 0.0f) {}
+          window_(static_cast<size_t>(cfg.seq_len) * cfg.input_dim(), 0.0f),
+          run_start_(wall_now()),
+          next_status_(std::chrono::steady_clock::now() + std::chrono::seconds(std::max(opt.status_every_s, 1))) {}
 
     void run() {
         MarketTick tick;
@@ -337,6 +387,7 @@ public:
                 // Idle (market closed, or between live bars): block instead of polling
                 consumer_wake.wait([] { return !event_queue.empty() || stream_finished.load(std::memory_order_acquire); },
                                    std::chrono::milliseconds(100));
+                maybe_status();
             } else {
                 backoff.wait();
             }
@@ -409,6 +460,10 @@ public:
                   << "Total Round Trips:     " << portfolio_.get_total_trades() << " (" << portfolio_.get_risk_exits()
                   << " stop/take-profit exits)\n"
                   << "Win Rate:              " << portfolio_.get_win_rate() << " %\n"
+                  << "Gains / Losses:        " << usd(portfolio_.get_gains(), true) << " (" << portfolio_.get_winning_trades()
+                  << " won) / " << usd(portfolio_.get_losses()) << " (" << portfolio_.get_losing_trades() << " lost)\n"
+                  << "Buy/Sell Calls Right:  " << (dir_calls_ ? 100.0 * dir_right_ / dir_calls_ : 0.0) << " % of " << dir_calls_
+                  << " (model's most likely class vs the price " << cfg_.label_horizon << " bars later)\n"
                   << "Avg Gross Exposure:    " << portfolio_.get_avg_gross_exposure() << " % of equity\n"
                   << "Max Drawdown:          " << portfolio_.get_max_drawdown() << " %\n"
                   << "Sharpe Ratio (ann.):   " << portfolio_.calculate_sharpe_ratio() << "\n"
@@ -429,6 +484,7 @@ private:
     static PortfolioParams make_portfolio_params(const EngineOptions& o) {
         PortfolioParams p;
         p.trade_log = o.trades_path;
+        p.append_log = o.live;
         p.fee_rate = o.fee_bps * 1e-4;
         p.position_weight = 1.0 / std::max(1, o.max_positions);
         return p;
@@ -474,6 +530,7 @@ private:
                 return;
             }
             bar_ts_ = tick.timestamp;
+            portfolio_.set_bar_time(bar_ts_);
             bar_index_++;
             stats_.bars++;
         }
@@ -497,7 +554,7 @@ private:
         }
 
         if (!trading_now()) return;
-        if (online()) learn_matured(st, tick.raw_price);
+        settle_matured(st, tick.raw_price);
         TickerState::Pending entry;
         if (ready) {
             st.pipeline.copy_window(window_.data());
@@ -511,11 +568,10 @@ private:
             st.edge = static_cast<double>(p[2]) - static_cast<double>(p[0]);
             st.signal_bar = bar_index_;
             entry.valid = true;
+            entry.call = (p[2] > p[1] && p[2] > p[0]) ? 1 : ((p[0] > p[1] && p[0] > p[2]) ? -1 : 0);
         }
-        if (online()) {
-            entry.price = tick.raw_price;
-            st.pending.push_back(std::move(entry));
-        }
+        entry.price = tick.raw_price;
+        st.pending.push_back(std::move(entry));
     }
 
     bool online() const { return opt_.online_lr > 0.0; }
@@ -530,18 +586,168 @@ private:
 #endif
     }
 
-    // The prediction made label_horizon bars ago now has its label (same rule as the training
-    // data): learn from it before predicting this bar
-    void learn_matured(TickerState& st, float price) {
+    // The prediction made label_horizon bars ago is settled by this price: score its buy/sell
+    // call and, with online learning, learn from its label (same rule as the training data)
+    // before predicting this bar
+    void settle_matured(TickerState& st, float price) {
         if (static_cast<int>(st.pending.size()) < cfg_.label_horizon) return;
         const TickerState::Pending& old = st.pending.front();
         if (old.valid && old.price > 0.0f && price > 0.0f) {
             const double ret = static_cast<double>(price) / old.price - 1.0;
-            const int label = ret > cfg_.label_hurdle ? 2 : (ret < -cfg_.label_hurdle ? 0 : 1);
-            model_.learn(old.z.data(), label, static_cast<float>(opt_.online_lr), static_cast<float>(opt_.online_anchor));
-            online_updates_++;
+            if (old.call != 0 && ret != 0.0) {
+                dir_calls_++;
+                dir_right_ += (ret > 0.0) == (old.call > 0);
+            }
+            if (online()) {
+                const int label = ret > cfg_.label_hurdle ? 2 : (ret < -cfg_.label_hurdle ? 0 : 1);
+                model_.learn(old.z.data(), label, static_cast<float>(opt_.online_lr), static_cast<float>(opt_.online_anchor));
+                online_updates_++;
+            }
         }
         st.pending.pop_front();
+    }
+
+    bool market_closed() const {
+#ifdef QUANT_LIVE
+        return opt_.live && live_status.state.load() == LiveStatus::Closed;
+#else
+        return false;
+#endif
+    }
+
+    // Called by the idle consumer (at least every 100 ms): a full summary every
+    // --status-every seconds while the market is open, one at the close, and a one-line
+    // heartbeat every hour while it is closed
+    void maybe_status() {
+        if (opt_.status_every_s <= 0) return;
+        const auto now = std::chrono::steady_clock::now();
+        const bool closed = market_closed();
+        if (closed != closed_seen_) {
+            closed_seen_ = closed;
+            if (closed) {
+                print_status();
+                next_status_ = now + std::chrono::hours(1);
+            } else {
+                next_status_ = now + std::chrono::seconds(opt_.status_every_s);
+            }
+            return;
+        }
+        if (now < next_status_) return;
+        if (closed) {
+            print_heartbeat();
+            next_status_ = now + std::chrono::hours(1);
+        } else {
+            print_status();
+            next_status_ = now + std::chrono::seconds(opt_.status_every_s);
+        }
+    }
+
+    std::string market_text() const {
+#ifdef QUANT_LIVE
+        if (opt_.live) {
+            const int64_t open = live_status.next_open.load(), close = live_status.next_close.load();
+            switch (live_status.state.load()) {
+            case LiveStatus::Streaming: return "market open until " + ny_time(close, "%H:%M");
+            case LiveStatus::Closed: {
+                const double hours = std::max<int64_t>(0, open - wall_now()) / 3600.0;
+                return "market closed, opens " + ny_time(open, "%a %Y-%m-%d %H:%M") + " (in " + num(hours, 1) + " h)";
+            }
+            case LiveStatus::Retrying: return "reconnecting to Alpaca";
+            default: return "starting";
+            }
+        }
+#endif
+        return "backtest";
+    }
+
+    std::string allocator_text() const {
+        return opt_.allocator == "qubo" ? "QUBO allocator, gamma " + num(opt_.risk_aversion, 1)
+                                        : std::string("greedy allocator (= QUBO at gamma 0)");
+    }
+
+#ifdef QUANT_LIVE
+    static std::string paper_line(const PaperBroker::Summary& a) {
+        if (!a.days) return "no snapshots yet";
+        return usd(a.equity) + ", total " + usd(a.equity - a.first_equity, true) + " (" +
+               num(100.0 * (a.equity - a.first_equity) / kCapital, 2, true) + "% of $10k)";
+    }
+#endif
+
+    void print_status() const {
+        const PortfolioManager& pf = portfolio_;
+        const double eq = pf.get_total_equity();
+        const long n = pf.get_bars_recorded();
+        const int trips = pf.get_total_trades();
+        std::ostringstream o;
+        o << "\n========== STATUS " << ny_time(wall_now(), "%Y-%m-%d %H:%M") << " New York | " << market_text() << " ==========\n"
+          << "Engine (simulated $10k account, this run since " << ny_time(run_start_, "%m-%d %H:%M") << "; " << n << " bars traded"
+          << (n ? ", last " + ny_time(bar_ts_, "%m-%d %H:%M") : std::string()) << ")\n"
+          << "  Equity        " << usd(eq) << " | P&L " << usd(pf.get_pnl(), true) << " (" << num(pf.get_return_pct(), 2, true)
+          << "%) | today " << usd(n ? eq - day_start_equity_ : 0.0, true) << "\n"
+          << "  Round trips   " << trips << ": " << pf.get_winning_trades() << " won " << usd(pf.get_gains(), true) << ", "
+          << pf.get_losing_trades() << " lost " << usd(pf.get_losses()) << " | win rate " << num(pf.get_win_rate(), 1) << "%";
+        if (pf.get_winning_trades()) o << " | avg win " << usd(pf.get_gains() / pf.get_winning_trades(), true);
+        if (pf.get_losing_trades()) o << ", avg loss " << usd(pf.get_losses() / pf.get_losing_trades());
+        o << "\n";
+        int open = 0;
+        std::string list;
+        for (const auto& name : asset_names_) {
+            const Position* p = pf.position(name);
+            if (!p) continue;
+            open++;
+            list += (list.empty() ? "" : "; ") + name + (p->units > 0 ? " long " : " short ") + num(std::abs(p->units), 1) + " @ " +
+                    num(p->avg_price, 2) + " now " + num(p->current_mid_price, 2);
+        }
+        o << "  Open          " << open << " position(s), unrealised " << usd(pf.get_unrealized_pnl(), true)
+          << (list.empty() ? "" : ": " + list) << "\n"
+          << "  Risk, costs   max drawdown " << num(pf.get_max_drawdown(), 2) << "% | avg gross exposure "
+          << num(pf.get_avg_gross_exposure(), 0) << "% | fees " << usd(pf.get_fees_paid()) << "\n";
+        o << "  Sharpe        ";
+        if (n > 1)
+            o << num(pf.calculate_sharpe_ratio(), 2) << " annualised, +/- " << num(std::sqrt(kBarsPerYear / n), 2) << " after " << n
+              << " bars (within 2x the +/- of 0 = indistinguishable from luck)\n";
+        else
+            o << "n/a until two bars have been traded\n";
+        o << "  Strategy      " << allocator_text() << ", max " << opt_.max_positions << " positions, "
+          << opt_.model_path.substr(opt_.model_path.find_last_of('/') + 1) << "\n"
+          << "  Model         buy/sell calls right ";
+        if (dir_calls_) o << num(100.0 * dir_right_ / dir_calls_, 1) << "% of " << dir_calls_ << " (vs the price " << cfg_.label_horizon * 5 << " min later)";
+        else o << "n/a yet (each call is settled " << cfg_.label_horizon * 5 << " min later)";
+        if (online()) o << " | online learning " << online_updates_ << " updates, lr " << num(opt_.online_lr, 4);
+        o << "\n";
+#ifdef QUANT_LIVE
+        if (broker_) {
+            const auto a = broker_->summary(kCapital);
+            o << "Paper account (Alpaca, all runs in account.csv"
+              << (a.days ? ", since " + ny_time(a.first_time, "%Y-%m-%d") + ", " + std::to_string(a.days) +
+                               (a.days == 1 ? " trading day" : " trading days")
+                         : std::string())
+              << ")\n";
+            if (a.days) {
+                o << "  Equity        " << paper_line(a) << " | today " << usd(a.today_pnl, true) << "\n  Daily Sharpe  ";
+                if (a.days < 3) o << "after 3 trading days";
+                else o << num(a.daily_sharpe, 2) << ", +/- " << num(std::sqrt(252.0 / (a.days - 1)), 2) << " after " << a.days - 1 << " daily changes";
+                o << " | max drawdown " << num(a.max_drawdown_pct, 2) << "% (daily closes)\n";
+            }
+            o << "  Orders        " << a.orders_ok << " accepted, " << a.orders_failed << " failed this run (orders.csv)\n";
+        }
+#endif
+        o << "==========================================================================\n";
+        std::cout << o.str() << std::flush;
+    }
+
+    void print_heartbeat() const {
+        std::ostringstream o;
+        o << "[status " << ny_time(wall_now(), "%Y-%m-%d %H:%M") << " NY] " << market_text() << " | engine " << usd(portfolio_.get_total_equity())
+          << " (" << num(portfolio_.get_return_pct(), 2, true) << "%, " << portfolio_.get_total_trades() << " round trips)";
+#ifdef QUANT_LIVE
+        if (broker_) {
+            const auto a = broker_->summary(kCapital);
+            o << " | paper " << paper_line(a);
+            if (a.days > 2) o << ", daily Sharpe " << num(a.daily_sharpe, 2) << " over " << a.days << " days";
+        }
+#endif
+        std::cout << o.str() << std::endl;
     }
 
 public:
@@ -625,11 +831,17 @@ private:
                                                                : QuboAllocator::greedy(views, capacity);
             std::vector<std::pair<std::string, int>> targets;
             for (size_t i = 0; i < names.size(); ++i) targets.push_back({names[i], dirs[i]});
+            const int64_t day = ny_day(bar_ts_);
+            if (day != day_) { // first bar of a New York day: today's P&L counts from here
+                day_ = day;
+                day_start_equity_ = last_equity_;
+            }
             portfolio_.rebalance(last_tick_id_, targets);
 
             auto t1 = std::chrono::steady_clock::now();
             if (!views.empty()) stats_.alloc_us.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
             portfolio_.record_equity();
+            last_equity_ = portfolio_.get_total_equity();
             send_targets();
             if (opt_.live && online() && ++bars_since_save_ >= 12) { // hourly
                 save_online_state();
@@ -642,8 +854,8 @@ private:
                 const std::time_t t = static_cast<std::time_t>(bar_ts_);
                 std::strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
                 std::cout << "[bar " << when << "] equity $" << std::fixed << std::setprecision(2)
-                          << portfolio_.get_total_equity() << " | " << open << " open position(s) | "
-                          << portfolio_.get_total_trades() << " round trips" << std::endl;
+                          << portfolio_.get_total_equity() << " (today " << usd(last_equity_ - day_start_equity_, true) << ") | "
+                          << open << " open position(s) | " << portfolio_.get_total_trades() << " round trips" << std::endl;
             }
 
             if (opt_.verbose && bar_index_ % 50 == 0) {
@@ -680,6 +892,16 @@ private:
     bool bar_closed_ = false; // the current bar was already closed by an end-of-bar marker
     long online_updates_ = 0;
     int bars_since_save_ = 0;
+    long dir_calls_ = 0, dir_right_ = 0; // settled buy/sell calls, and how many the price agreed with
+    // Status summary
+    static constexpr double kCapital = 10000.0; // PortfolioParams::starting_cash
+    static constexpr double kBarsPerYear = 252.0 * 78.0;
+    int64_t run_start_;
+    std::chrono::steady_clock::time_point next_status_;
+    bool closed_seen_ = false;
+    int64_t day_ = INT64_MIN;
+    double day_start_equity_ = kCapital;
+    double last_equity_ = kCapital;
 #ifdef QUANT_LIVE
     PaperBroker* broker_ = nullptr;
 #endif

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -14,6 +15,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #include "ar_estimator.hpp"
 #include "feature_pipeline.hpp"
@@ -26,6 +29,9 @@
 #include "native_model.hpp"
 #include "json_lite.hpp"
 #include "live_bars.hpp"
+#ifdef QUANT_LIVE
+#include "paper_broker.hpp"
+#endif
 
 static int g_failures = 0;
 static int g_checks = 0;
@@ -368,6 +374,8 @@ static void test_portfolio() {
     const double expected_cost = 2 * 2500 * (2 * 0.0001 + 0.0001 + 0.0001); // fee both ways + half spread both ways
     CHECK(near(pm.get_pnl(), -expected_cost, 0.6), "flat round trip costs fees + spread only");
     CHECK(near(pm.get_gross_exposure(), 0.0, 1e-9), "flat after closing");
+    CHECK(pm.get_losing_trades() == 2 && near(pm.get_gains() + pm.get_losses(), pm.get_pnl(), 1e-9),
+          "round trips are net of both fees: gains + losses = P&L when flat");
 
     // Short proceeds are not buying power
     PortfolioParams p2 = p;
@@ -588,6 +596,41 @@ static void test_live_bars() {
     }
 }
 
+#ifdef QUANT_LIVE
+// The paper account summary reads earlier runs' account.csv: daily closes in New York time
+static void test_paper_summary() {
+    std::cout << "[live] paper account summary from account.csv\n";
+    const std::string dir = "/tmp/quant_engine_tests_" + std::to_string(::getpid());
+    std::filesystem::create_directories(dir);
+    {
+        std::ofstream f(dir + "/account.csv");
+        f << "time,bar,equity,cash,positions,targets\n"
+             "2026-03-02T15:00:00Z,2026-03-02T14:55:00Z,100000.00,100000.00,,\n"
+             "2026-03-02T20:55:00Z,2026-03-02T20:50:00Z,100050.00,90000.00,SPY:3,SPY:3\n"
+             "2026-03-03T15:00:00Z,2026-03-03T14:55:00Z,100020.00,90000.00,SPY:3,SPY:3\n"
+             "2026-03-03T20:55:00Z,2026-03-03T20:50:00Z,99980.00,90000.00,SPY:3,SPY:3\n"
+             "2026-03-04T20:55:00Z,2026-03-04T20:50:00Z,100100.00,90000.00,SPY:3,SPY:3\n"
+             "2026-03-05T14:35:00Z,2026-03-05T14:30:00Z,100150.00,90000.00,SPY:3,SPY:3\n"
+             "2026-03-05T15:00:00Z,2026-03-05T14:55:00Z,,,SPY:3,SPY:3\n"            // account request failed
+             "2026-03-06T01:00:00Z,2026-03-05T20:55:00Z,100120.00,90000.00,SPY:3,\n"; // 20:00 New York, still 03-05
+    }
+    PaperBroker::Summary s;
+    {
+        PaperBroker broker("http://127.0.0.1:1", "k", "s", {"SPY"}, dir);
+        s = broker.summary(10000.0);
+    }
+    const double d[] = {-70.0, 120.0, 20.0}; // day-to-day changes of the closes 100050, 99980, 100100, 100120
+    const double mean = (d[0] + d[1] + d[2]) / 3.0;
+    const double sd = std::sqrt(((d[0] - mean) * (d[0] - mean) + (d[1] - mean) * (d[1] - mean) + (d[2] - mean) * (d[2] - mean)) / 2.0);
+    CHECK(s.days == 4, "four New York trading days (a 01:00 UTC row belongs to the previous evening)");
+    CHECK(near(s.first_equity, 100000.0, 1e-9) && near(s.equity, 100120.0, 1e-9), "first and latest equity; empty rows skipped");
+    CHECK(near(s.today_pnl, 20.0, 1e-9), "today = latest vs the previous day's close");
+    CHECK(near(s.daily_sharpe, mean / sd * std::sqrt(252.0), 1e-9), "daily Sharpe from close-to-close changes");
+    CHECK(near(s.max_drawdown_pct, 0.7, 1e-9), "drawdown on capital + P&L: 10000 -> 9930");
+    std::filesystem::remove_all(dir);
+}
+#endif
+
 int main(int argc, char** argv) {
     const std::string fixtures = argc > 1 ? argv[1] : "tests/fixtures";
     test_quantum_gates();
@@ -600,6 +643,9 @@ int main(int argc, char** argv) {
     test_portfolio();
     test_tick_parsing();
     test_live_bars();
+#ifdef QUANT_LIVE
+    test_paper_summary();
+#endif
     std::cout << "\n" << (g_checks - g_failures) << "/" << g_checks << " checks passed\n";
     return g_failures == 0 ? 0 : 1;
 }
