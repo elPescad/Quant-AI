@@ -5,18 +5,20 @@
 // Replaces libtorch: the weights are read once into flat arrays and the GRU runs as
 // plain vectorisable loops, with no interpreter, dispatcher or tensor allocation.
 //
-// File layout (little endian):
-//   "QGRU" | int32 version | int32 combine | int32 n_nets
-//   per net: int32 n_inputs, hidden, layers
+// File layout (little endian, version 2):
+//   "QGRU" | int32 version | int32 combine | int32 n_groups
+//   per group: int32 n_nets, then per net (one per random start of the same model):
+//            int32 n_inputs, hidden, layers
 //            per layer: weight_ih [3H x in], weight_hh [3H x H], bias_ih [3H], bias_hh [3H]
 //                       (PyTorch gate order r, z, n)
 //            head weight [3 x (H + n_inputs)], head bias [3]
 //            calibration: float inv_temperature, float bias[3]
 // Each net reads the first n_inputs features of every window row and outputs
 //   logits = head([h_last, x_last]) * inv_temperature + bias.
-// combine: 0 single net | 1 mean of the nets' probabilities |
-//          2 net0 probabilities, HOLD when net1 disagrees on direction |
-//          3 same, but only net0 SELL calls need agreement
+// A group's probabilities are the mean over its nets' softmax outputs.
+// combine: 0 single group | 1 mean of the two groups' probabilities |
+//          2 group0 probabilities, HOLD when group1 disagrees on direction |
+//          3 same, but only group0 SELL calls need agreement
 
 #include <algorithm>
 #include <bit>
@@ -40,17 +42,26 @@ public:
         if (!in || std::memcmp(magic, "QGRU", 4) != 0) throw std::runtime_error(path + " is not a QGRU model file");
         NativeModel m;
         const int32_t version = read_i32(in);
-        if (version != 1) throw std::runtime_error(path + ": unsupported model version " + std::to_string(version));
+        if (version != 2)
+            throw std::runtime_error(path + ": model format version " + std::to_string(version) +
+                                     " is not supported; re-export it with python/train_and_export.py");
         m.combine_ = static_cast<Combine>(read_i32(in));
-        const int32_t n_nets = read_i32(in);
-        const int32_t expected_nets = m.combine_ == kSingle ? 1 : 2;
-        if (m.combine_ < kSingle || m.combine_ > kVetoShort || n_nets != expected_nets)
-            throw std::runtime_error(path + ": bad combine mode / net count");
-        for (int k = 0; k < n_nets; ++k) m.nets_.push_back(Net::read(in, path));
+        const int32_t n_groups = read_i32(in);
+        const int32_t expected_groups = m.combine_ == kSingle ? 1 : 2;
+        if (m.combine_ < kSingle || m.combine_ > kVetoShort || n_groups != expected_groups)
+            throw std::runtime_error(path + ": bad combine mode / group count");
+        for (int g = 0; g < n_groups; ++g) {
+            const int32_t n_nets = read_i32(in);
+            if (n_nets < 1 || n_nets > 64) throw std::runtime_error(path + ": implausible number of nets in a group");
+            m.groups_.emplace_back();
+            for (int k = 0; k < n_nets; ++k) m.groups_.back().push_back(Net::read(in, path));
+        }
         size_t scratch = 0;
-        for (const auto& n : m.nets_) {
-            m.input_dim_ = std::max(m.input_dim_, n.n_inputs);
-            scratch = std::max(scratch, static_cast<size_t>(n.hidden) * (6 + n.layers.size())); // gi, gh, h per layer
+        for (const auto& group : m.groups_) {
+            for (const auto& n : group) {
+                m.input_dim_ = std::max(m.input_dim_, n.n_inputs);
+                scratch = std::max(scratch, static_cast<size_t>(n.hidden) * (6 + n.layers.size())); // gi, gh, h per layer
+            }
         }
         m.scratch_.assign(scratch, 0.0f);
         return m;
@@ -61,12 +72,12 @@ public:
     // window: seq_len rows of row_stride floats (oldest first). Writes SELL/HOLD/BUY probabilities.
     void predict(const float* window, int seq_len, int row_stride, float probs[3]) {
         float p0[3], p1[3];
-        nets_[0].probs(window, seq_len, row_stride, scratch_.data(), p0);
+        group_probs(groups_[0], window, seq_len, row_stride, p0);
         if (combine_ == kSingle) {
             std::memcpy(probs, p0, sizeof(p0));
             return;
         }
-        nets_[1].probs(window, seq_len, row_stride, scratch_.data(), p1);
+        group_probs(groups_[1], window, seq_len, row_stride, p1);
         if (combine_ == kMean) {
             for (int c = 0; c < 3; ++c) probs[c] = 0.5f * (p0[c] + p1[c]);
             return;
@@ -215,8 +226,19 @@ private:
         return t;
     }
 
+    void group_probs(const std::vector<Net>& group, const float* window, int seq_len, int row_stride, float p[3]) {
+        p[0] = p[1] = p[2] = 0.0f;
+        for (const Net& net : group) {
+            float q[3];
+            net.probs(window, seq_len, row_stride, scratch_.data(), q);
+            for (int c = 0; c < 3; ++c) p[c] += q[c];
+        }
+        const float inv = 1.0f / static_cast<float>(group.size());
+        for (int c = 0; c < 3; ++c) p[c] *= inv;
+    }
+
     Combine combine_ = kSingle;
-    std::vector<Net> nets_;
+    std::vector<std::vector<Net>> groups_;
     int input_dim_ = 0;
     std::vector<float> scratch_;
 };

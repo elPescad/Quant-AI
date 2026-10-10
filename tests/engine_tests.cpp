@@ -382,6 +382,29 @@ static void test_portfolio() {
     pm3.mark(0, "X", 100.0f, 0.0f);
     pm3.rebalance(0, {{"X", 1}});
     CHECK(pm3.mark(1, "X", 98.5f, 0.0f) && pm3.direction("X") == 0, "hard stop closes a losing long");
+
+    // Costs: a measured quote overrides the capped high-low proxy
+    PortfolioManager pm4(p);
+    pm4.mark(0, "Q", 500.0f, 0.60f, 0.01f);  // high-low 12 bp, quoted 1 cent = 0.2 bp
+    CHECK(near(pm4.one_way_cost("Q"), 0.5 * 0.01 / 500.0 + 0.0001, 1e-12), "quoted spread sets the cost");
+    pm4.mark(1, "Q", 500.0f, 0.60f);         // no quote on this tick
+    CHECK(near(pm4.one_way_cost("Q"), 0.5 * p.max_spread_cost_pct + 0.0001, 1e-12), "without a quote the capped proxy is used");
+    pm4.mark(2, "Q", 500.0f, 0.60f, 10.0f);   // 2% quoted spread: bad data
+    pm4.rebalance(2, {{"Q", 1}});
+    CHECK(pm4.direction("Q") == 0, "no entry when the quoted spread is implausibly wide");
+}
+
+static void test_tick_parsing() {
+    std::cout << "[market data] CSV rows with and without quoted_spread\n";
+    MarketTick t;
+    CHECK(parse_tick_row("1700000000,SPY,650.5,0.6,1.2,0.1,0.1,2", t) && t.quoted_spread < 0 && t.target == 2,
+          "8-column row parses, spread unknown");
+    CHECK(parse_tick_row("1700000000,SPY,650.5,0.6,1.2,0.1,0.1,2,0.01", t) && near(t.quoted_spread, 0.01, 1e-7) && t.target == 2,
+          "9-column row carries the quoted spread");
+    CHECK(parse_tick_row("1700000000,SPY,650.5,0.6,1.2,0.1,0.1,-1,-1", t) && t.quoted_spread < 0 && t.target == -1,
+          "-1 quoted spread means unknown");
+    CHECK(is_tick_csv_header("timestamp,ticker,raw_price,raw_spread,raw_ofi,raw_delta,raw_vol,target,quoted_spread"),
+          "header with quoted_spread accepted");
 }
 
 // Native C++ GRU vs PyTorch on random-weight models in every combine mode
@@ -440,6 +463,7 @@ int main(int argc, char** argv) {
     test_ring_buffer();
     test_native_gru(fixtures);
     test_portfolio();
+    test_tick_parsing();
     std::cout << "\n" << (g_checks - g_failures) << "/" << g_checks << " checks passed\n";
     return g_failures == 0 ? 0 : 1;
 }

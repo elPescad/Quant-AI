@@ -51,6 +51,7 @@ struct EngineOptions {
     int64_t end_ts = INT64_MAX;
     int max_positions = 4;
     double risk_aversion = 100.0;
+    double fee_bps = 0.2; // Per fill
     bool verify_qubo = false;
     bool verbose = false;
 };
@@ -65,6 +66,7 @@ void usage() {
                  "  --allocator greedy|qubo  position selection (default greedy = QUBO at gamma 0)\n"
                  "  --risk-aversion X      QUBO risk aversion gamma (default 100)\n"
                  "  --max-positions K      max simultaneous positions (default 4)\n"
+                 "  --fee-bps X            fees per fill in basis points (default 0.2)\n"
                  "  --verify-qubo          check every SA solution against brute force\n"
                  "  --trades PATH          trade log (default trades.csv)\n"
                  "  --verbose              per-bar debug output\n";
@@ -87,6 +89,7 @@ bool parse_args(int argc, char** argv, EngineOptions& o) {
         else if (a == "--end-ts") o.end_ts = std::stoll(next());
         else if (a == "--max-positions") o.max_positions = std::stoi(next());
         else if (a == "--risk-aversion") o.risk_aversion = std::stod(next());
+        else if (a == "--fee-bps") o.fee_bps = std::stod(next());
         else if (a == "--verify-qubo") o.verify_qubo = true;
         else if (a == "--verbose") o.verbose = true;
         else if (a == "--help" || a == "-h") { usage(); return false; }
@@ -182,6 +185,9 @@ struct EngineStats {
     long bars = 0;
     long trading_bars = 0;
     long ticks = 0;
+    double cost_sum = 0.0; // One-way costs the allocator was given
+    long cost_n = 0;
+    long quoted_ticks = 0; // Ticks carrying a measured bid-ask spread
 };
 
 class Engine {
@@ -265,6 +271,9 @@ public:
                   << "Ending Equity:         $" << portfolio_.get_total_equity() << "\n"
                   << "Total Net PnL:         $" << portfolio_.get_pnl() << " (" << portfolio_.get_return_pct() << "%)\n"
                   << "Fees Paid:             $" << portfolio_.get_fees_paid() << "\n"
+                  << "Avg One-Way Cost:      " << (stats_.cost_n ? 1e4 * stats_.cost_sum / stats_.cost_n : 0.0)
+                  << " bp (spread from " << (stats_.quoted_ticks * 2 > stats_.ticks ? "measured quotes" : "high-low proxy, capped")
+                  << ", fees " << opt_.fee_bps << " bp/fill; opening a position budgets entry + exit)\n"
                   << "Total Round Trips:     " << portfolio_.get_total_trades() << " (" << portfolio_.get_risk_exits()
                   << " stop/take-profit exits)\n"
                   << "Win Rate:              " << portfolio_.get_win_rate() << " %\n"
@@ -284,6 +293,7 @@ private:
     static PortfolioParams make_portfolio_params(const EngineOptions& o) {
         PortfolioParams p;
         p.trade_log = o.trades_path;
+        p.fee_rate = o.fee_bps * 1e-4;
         p.position_weight = 1.0 / std::max(1, o.max_positions);
         return p;
     }
@@ -337,7 +347,8 @@ private:
         st.last_price = tick.raw_price;
         st.seen_this_bar = true;
 
-        if (portfolio_.mark(tick.id, sym, tick.raw_price, tick.raw_spread)) {
+        stats_.quoted_ticks += tick.quoted_spread > 0.0f;
+        if (portfolio_.mark(tick.id, sym, tick.raw_price, tick.raw_spread, tick.quoted_spread)) {
             st.cooldown_until = bar_index_ + COOLDOWN_BARS;
         }
 
@@ -391,6 +402,8 @@ private:
                 v.asset = st.asset;
                 v.expected_return = st.edge * st.moves.typical_move();
                 v.cost = portfolio_.one_way_cost(name);
+                stats_.cost_sum += v.cost;
+                stats_.cost_n++;
                 v.current = cur;
                 views.push_back(v);
                 names.push_back(name);

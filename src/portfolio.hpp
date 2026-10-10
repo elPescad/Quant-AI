@@ -23,15 +23,17 @@ struct Position {
 
 struct PortfolioParams {
     double starting_cash = 10000.0;
-    double fee_rate = 0.0001;
+    // Per-fill fees as a fraction of notional. Alpaca charges no commission; the regulatory fees
+    // on sales (SEC Section 31, FINRA TAF) are a fraction of a basis point.
+    double fee_rate = 0.00002;
     double position_weight = 0.20;     // Fraction of equity per position
     double max_gross_leverage = 1.0;   // Cap on sum(|position value|) / equity
     double take_profit_pct = 0.0160;
     double stop_loss_pct = 0.0100;
     double trailing_stop_pct = 0.0050;
     double trailing_activation_pct = 0.0020; // Trailing stop arms after this open profit
-    double max_spread_cost_pct = 0.0005;     // raw_spread from 5m bars is the high-low range; cap it
-    double max_raw_spread_pct = 0.01;        // Larger quoted spreads are treated as bad data
+    double max_spread_cost_pct = 0.0005;     // Without quotes, raw_spread (the bar's high-low range) is a cost proxy; cap it
+    double max_raw_spread_pct = 0.01;        // Larger spreads are treated as bad data
     double bars_per_year = 252.0 * 78.0;     // 5-minute bars
     std::string trade_log = "trades.csv";
 };
@@ -49,16 +51,18 @@ public:
 
     // Updates the mark price and runs take-profit / stop-loss / trailing-stop exits.
     // Returns true when a risk exit closed the position.
-    bool mark(int tick_id, const std::string& ticker, float raw_price, float raw_spread) {
+    // quoted_spread: measured bid-ask spread in $ (<= 0: unknown, use the capped raw_spread proxy)
+    bool mark(int tick_id, const std::string& ticker, float raw_price, float raw_spread, float quoted_spread = -1.0f) {
         // Reject malformed ticks before they can turn into absurd position sizes
         if (!std::isfinite(raw_price) || raw_price <= 0.0f || !std::isfinite(raw_spread) || raw_spread < 0.0f) {
             return false;
         }
         Position& pos = positions_[ticker];
         pos.current_mid_price = raw_price;
-        const double spread_rel = static_cast<double>(raw_spread) / pos.current_mid_price;
+        const bool quoted = std::isfinite(quoted_spread) && quoted_spread > 0.0f;
+        const double spread_rel = static_cast<double>(quoted ? quoted_spread : raw_spread) / pos.current_mid_price;
         spread_ok_[ticker] = spread_rel <= p_.max_raw_spread_pct;
-        pos.half_spread_pct = 0.5 * std::min(spread_rel, p_.max_spread_cost_pct);
+        pos.half_spread_pct = 0.5 * (quoted ? spread_rel : std::min(spread_rel, p_.max_spread_cost_pct));
 
         if (pos.direction() > 0) {
             const double fill = bid(pos);

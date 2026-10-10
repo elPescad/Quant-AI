@@ -2,10 +2,16 @@
 
 Needs a (free) Alpaca account:
     export APCA_API_KEY_ID=...  APCA_API_SECRET_KEY=...
+
+Besides the bars it measures real bid-ask spreads for trading costs (quoted_spread column):
+--quote-samples times per trading day, all tickers' quotes over a 1-second window; each bar
+gets the median spread of the nearest sample. Spreads of these large caps are very stable,
+so sampling costs ~10 minutes of API calls instead of downloading every quote.
 """
 
 import argparse
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,8 +19,11 @@ import requests
 from alpaca.common.exceptions import APIError
 from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest, StockQuotesRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+import numpy as np
+import pandas as pd
 
 from bar_schema import bars_to_ticks, epoch_seconds, regular_session_mask, write_ticks
 from fetch_real_ticks import OUTPUT_FILE, TARGET_TICKERS
@@ -79,8 +88,67 @@ def download(client, days, feed):
     return client.get_stock_bars(request).df
 
 
-def generate_raw_tick_dataset(days, feed, output_file):
-    client = StockHistoricalDataClient(*credentials())
+QUOTE_WINDOW = timedelta(seconds=1)
+MIN_REQUEST_INTERVAL = 0.32  # s; the free plan allows 200 market-data requests per minute
+
+
+def sample_times(bar_index, per_day):
+    """per_day evenly spaced instants inside each day's session (first bar + 5 min .. last bar + 4 min)."""
+    ny = pd.DatetimeIndex(bar_index).tz_convert("America/New_York")
+    times = []
+    for _, day in pd.Series(ny, index=ny).groupby(ny.date):
+        lo, hi = day.min() + pd.Timedelta(minutes=5), day.max() + pd.Timedelta(minutes=4)
+        times += list(pd.date_range(lo, hi, periods=per_day)) if per_day > 1 else [lo]
+    return [t.tz_convert("UTC") for t in times]
+
+
+def sample_spreads(key, secret, times, feed):
+    """Median bid-ask spread ($) per ticker in a QUOTE_WINDOW starting at each time."""
+    client = StockHistoricalDataClient(key, secret, raw_data=True)
+    print(f"[+] Sampling {feed.value.upper()} quotes at {len(times)} times (~{len(times) * MIN_REQUEST_INTERVAL / 60:.0f} min)")
+    rows, last = [], 0.0
+    for i, t in enumerate(times):
+        time.sleep(max(0.0, MIN_REQUEST_INTERVAL - (time.monotonic() - last)))
+        last = time.monotonic()
+        request = StockQuotesRequest(symbol_or_symbols=TARGET_TICKERS, start=t.to_pydatetime(),
+                                     end=(t + QUOTE_WINDOW).to_pydatetime(), feed=feed)
+        try:
+            quotes = client.get_stock_quotes(request)
+        except APIError as e:
+            if e.status_code == 401:
+                auth_failure(e)
+            if e.status_code != 403 or feed != DataFeed.SIP:
+                raise
+            print("    [!] SIP quotes refused; using IEX quotes (IEX's own book, wider than the NBBO)")
+            done = _samples_frame(rows)
+            return pd.concat([done, sample_spreads(key, secret, times[i:], DataFeed.IEX)], ignore_index=True)
+        for sym, qs in quotes.items():
+            spreads = [q["ap"] - q["bp"] for q in qs if q.get("bp", 0) > 0 and q.get("ap", 0) > q["bp"]]
+            if spreads:
+                rows.append((sym, int(t.timestamp()), float(np.median(spreads))))
+        if (i + 1) % 200 == 0:
+            print(f"    {i + 1}/{len(times)} samples")
+    return _samples_frame(rows)
+
+
+def _samples_frame(rows):
+    return pd.DataFrame(rows, columns=["symbol", "ts", "spread"]).astype({"ts": "int64", "spread": "float64"})
+
+
+def attach_spreads(symbol, ts, samples):
+    """Spread of the nearest same-session sample for each bar; the ticker's median where none is close."""
+    mine = samples[samples["symbol"] == symbol].sort_values("ts")
+    if mine.empty:
+        return None
+    bars = pd.DataFrame({"ts": ts, "order": np.arange(len(ts))}).sort_values("ts")
+    merged = pd.merge_asof(bars, mine[["ts", "spread"]], on="ts", direction="nearest", tolerance=45 * 60)
+    merged["spread"] = merged["spread"].fillna(mine["spread"].median())
+    return merged.sort_values("order")["spread"].to_numpy()
+
+
+def generate_raw_tick_dataset(days, feed, output_file, quote_samples=13):
+    key, secret = credentials()
+    client = StockHistoricalDataClient(key, secret)
     print(f"[+] Downloading {days}d of 5-minute {feed.value.upper()} bars from Alpaca for: {TARGET_TICKERS}")
     try:
         bars = download(client, days, feed)
@@ -93,14 +161,28 @@ def generate_raw_tick_dataset(days, feed, output_file):
         print(f"    [!] SIP feed refused ({e}); falling back to IEX (IEX-only volume)")
         bars = download(client, days, DataFeed.IEX)
 
-    frames = []
+    per_symbol = {}
     for symbol in TARGET_TICKERS:
         if symbol not in bars.index.get_level_values("symbol"):
             print(f"    [!] No data for {symbol}, skipping")
             continue
         df = bars.xs(symbol, level="symbol").sort_index()
-        df = df[regular_session_mask(df.index)]
-        frames.append(bars_to_ticks(symbol, epoch_seconds(df.index), df["high"], df["low"], df["close"], df["volume"]))
+        per_symbol[symbol] = df[regular_session_mask(df.index)]
+
+    samples = None
+    if quote_samples > 0 and per_symbol:
+        all_bars = pd.DatetimeIndex(sorted(set().union(*(set(df.index) for df in per_symbol.values()))))
+        samples = sample_spreads(key, secret, sample_times(all_bars, quote_samples), feed)
+
+    frames = []
+    print(f"    {'ticker':<6}{'quoted spread':>15}{'quoted bp':>11}{'high-low bp':>13}  (medians)")
+    for symbol, df in per_symbol.items():
+        ts = epoch_seconds(df.index)
+        quoted = attach_spreads(symbol, ts, samples) if samples is not None else None
+        hl_bp = np.median((df["high"] - df["low"]) / df["close"]) * 1e4
+        if quoted is not None:
+            print(f"    {symbol:<6}{'$' + format(np.median(quoted), '.4f'):>15}{np.median(quoted / df['close']) * 1e4:>11.2f}{hl_bp:>13.2f}")
+        frames.append(bars_to_ticks(symbol, ts, df["high"], df["low"], df["close"], df["volume"], quoted))
     write_ticks(frames, TARGET_TICKERS, output_file)
 
 
@@ -109,9 +191,11 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=180, help="calendar days of history (default 180)")
     parser.add_argument("--feed", choices=["sip", "iex"], default="sip")
     parser.add_argument("--output", type=Path, default=OUTPUT_FILE)
+    parser.add_argument("--quote-samples", type=int, default=13,
+                        help="spread samples per trading day for trading costs (0 = no quotes, default 13)")
     parser.add_argument("--check-keys", action="store_true", help="only test the keys against each Alpaca service")
     args = parser.parse_args()
     if args.check_keys:
         check_keys()
     else:
-        generate_raw_tick_dataset(args.days, DataFeed(args.feed), args.output)
+        generate_raw_tick_dataset(args.days, DataFeed(args.feed), args.output, args.quote_samples)

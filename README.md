@@ -28,7 +28,8 @@ source ~/quant-ml-engine/venv/bin/activate
 
 # 1. Data: 5-minute regular-session bars, same features/labels for every source (python/bar_schema.py)
 python python/fetch_alpaca_ticks.py      # Alpaca (alpaca-py): needs APCA_API_KEY_ID / APCA_API_SECRET_KEY;
-                                         #   --days 180 (default), --feed sip|iex, --output PATH
+                                         #   --days 180 (default), --feed sip|iex, --output PATH; also samples
+                                         #   real bid-ask quotes (--quote-samples 13/day) for trading costs
 python python/fetch_real_ticks.py        # Yahoo: last 60 days only
 python python/generate_ticks.py          # synthetic data with a known signal
 
@@ -45,6 +46,7 @@ python python/sanity_check.py --data data/alpaca_ticks.csv
 # 2. Train. Splits by time: 60% train / 20% validation / 20% test. Early stopping, quantum
 #    bandwidth and probability calibration use the last 20% of the training window, so the
 #    validation period stays out-of-sample. Labels crossing a split boundary are purged.
+#    Each GRU is trained from --seeds 5 random starts and their probabilities are averaged.
 #    Writes baseline_model (raw), quant_model (quantum), ensemble_model (average),
 #    quant_veto_model and quant_veto_short_model (raw vetoes quantum) as <name>.weights,
 #    each with <name>_config.txt
@@ -90,23 +92,28 @@ to start without the config. Re-run `train_and_export.py` after changing the fea
 | `--allocator greedy\|qubo` | `greedy` | `greedy` = top-K by net expected return; it equals the QUBO optimum at `gamma = 0`, the walk-forward choice. |
 | `--risk-aversion X` | `100` | QUBO covariance penalty γ (tune with `--period val`). |
 | `--max-positions K` | `4` | Each position is `1/K` of equity. |
+| `--fee-bps X` | `0.2` | Fees per fill. Alpaca charges no commission; this covers the regulatory fees on sales. |
 | `--verify-qubo` | off | Solve every bar's QUBO by brute force too and report how often SA found the optimum. |
 | `--model`, `--config`, `--data`, `--trades` | | Paths. Default model `../models/ensemble_model.weights`; `--data -` reads ticks from stdin (for a live feed). |
 
 ## Data format
 
 ```
-timestamp,ticker,raw_price,raw_spread,raw_ofi,raw_delta,raw_vol,target
+timestamp,ticker,raw_price,raw_spread,raw_ofi,raw_delta,raw_vol,target,quoted_spread
 ```
 
 Rows that share a `timestamp` form one bar; the engine rebalances once per bar. `target`
 is the 6-bar-ahead label (0 sell, 1 hold, 2 buy, -1 unknown for the last bars).
+`raw_spread` is the bar's high-low range (a model feature). `quoted_spread` is the measured
+bid-ask spread in $ used for fill costs; it is optional (`-1` or absent when the source has
+no quotes, e.g. Yahoo or synthetic data, and then the engine falls back to the high-low
+range capped at 5 bp, which overstates costs for liquid stocks).
 
 ## Caveats
 
 * The quantum part is a classical simulation of a 5-qubit circuit. It is a fixed nonlinear
   feature map, not a source of quantum speed-up.
-* `raw_spread` (Yahoo and Alpaca) is the bar's high-low range, not a quoted spread; fills assume
-  at most a 5 bp spread.
+* Fills happen at the bar's closing mid ± half the quoted spread. With Alpaca data the spread
+  is measured from sampled quotes; queue position, latency and market impact are not modelled.
 * Results on synthetic data only show that the machinery works; validate on real data
   before drawing conclusions.

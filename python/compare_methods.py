@@ -56,12 +56,13 @@ METRICS = {
 }
 
 
-def train(data, model_dir, val_start, test_start, log):
+def train(data, model_dir, val_start, test_start, log, seeds):
     model_dir.mkdir(parents=True, exist_ok=True)
     print(f"[+] Training -> {model_dir} (val from {val_start}, test from {test_start})", flush=True)
     with log.open("w") as f:
         r = subprocess.run([sys.executable, str(PROJECT_ROOT / "python" / "train_and_export.py"), "--data", str(data),
-                            "--model-dir", str(model_dir), "--val-start", str(val_start), "--test-start", str(test_start)],
+                            "--model-dir", str(model_dir), "--val-start", str(val_start), "--test-start", str(test_start),
+                            "--seeds", str(seeds)],
                            stdout=f, stderr=subprocess.STDOUT)
     if r.returncode != 0:
         sys.exit(f"[-] training failed, see {log}")
@@ -131,6 +132,7 @@ def main():
     p.add_argument("--runner", type=Path, default=PROJECT_ROOT / "build" / "model_runner")
     p.add_argument("--workdir", type=Path, help="default runs/<data file stem>")
     p.add_argument("--folds", type=int, default=3)
+    p.add_argument("--seeds", type=int, default=5, help="random starts per GRU, averaged (passed to training)")
     p.add_argument("--gammas", type=float, nargs="+", default=[0.0, 25.0, 100.0], help="QUBO risk aversion grid (0 = greedy)")
     p.add_argument("--min-trades", type=float, default=5.0, help="minimum average round trips per fold to be selectable")
     p.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1), help="parallel backtests")
@@ -155,13 +157,13 @@ def main():
     for k in range(a.folds):
         fold_dir = workdir / f"fold{k + 1}"
         if not a.skip_train:
-            train(data, fold_dir / "models", edges[k], edges[k + 1], fold_dir / "train.log")
+            train(data, fold_dir / "models", edges[k], edges[k + 1], fold_dir / "train.log", a.seeds)
         print(f"    fold {k + 1}: backtesting [{edges[k]}, {edges[k + 1]})", flush=True)
         fold_results.append(run_all(a.jobs, engine, data, fold_dir / "models", candidates, edges[k], edges[k + 1], fold_dir))
 
     final_dir = workdir / "final"
     if not a.skip_train:
-        train(data, final_dir / "models", test_start, test_start, final_dir / "train.log")
+        train(data, final_dir / "models", test_start, test_start, final_dir / "train.log", a.seeds)
     print(f"    test: backtesting [{test_start}, end)", flush=True)
     test = run_all(a.jobs, engine, data, final_dir / "models", candidates, test_start, None, final_dir)
 

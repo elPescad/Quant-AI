@@ -9,7 +9,9 @@ import polars as pl
 
 LABEL_HORIZON = 6        # Bars ahead used for the label (30 minutes on 5m bars)
 FEE_HURDLE_PCT = 0.0004  # 4 bps return threshold for BUY / SELL labels
-COLUMNS = ["timestamp", "ticker", "raw_price", "raw_spread", "raw_ofi", "raw_delta", "raw_vol", "target"]
+COLUMNS = ["timestamp", "ticker", "raw_price", "raw_spread", "raw_ofi", "raw_delta", "raw_vol", "target", "quoted_spread"]
+# raw_spread is the bar's high-low range (a model feature). quoted_spread is the measured
+# bid-ask spread in $ used for trading costs, or -1 when the source has no quotes.
 
 
 def epoch_seconds(index):
@@ -25,7 +27,7 @@ def regular_session_mask(index):
     return np.asarray((ny.dayofweek < 5) & (minutes >= 9 * 60 + 30) & (minutes < 16 * 60))
 
 
-def bars_to_ticks(symbol, timestamps, high, low, close, volume):
+def bars_to_ticks(symbol, timestamps, high, low, close, volume, quoted_spread=None):
     close = np.asarray(close, dtype=np.float64)
     high = np.asarray(high, dtype=np.float64)
     low = np.asarray(low, dtype=np.float64)
@@ -54,6 +56,8 @@ def bars_to_ticks(symbol, timestamps, high, low, close, volume):
         "raw_delta": price_delta.astype(np.float32),
         "raw_vol": volatility.astype(np.float32),
         "target": target,
+        "quoted_spread": (np.full(len(close), -1.0) if quoted_spread is None
+                          else np.asarray(quoted_spread, dtype=np.float64)).astype(np.float32),
     })
 
 

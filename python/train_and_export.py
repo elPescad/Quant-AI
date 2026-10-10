@@ -47,6 +47,7 @@ MAX_EPOCHS = 40
 PATIENCE = 6
 LEARNING_RATE = 1e-3
 SEED = 7
+SEEDS = 5  # Random starts per GRU; their calibrated probabilities are averaged
 
 
 class QuantGRU(nn.Module):
@@ -89,6 +90,18 @@ class Calibrated(nn.Module):
 
     def forward(self, x):
         return self.base(x[:, :, : self.n_inputs]) * self.inv_t + self.bias
+
+
+class SeedAverage(nn.Module):
+    """Mean probabilities of the same model trained from several random starts (log-probabilities out)."""
+
+    def __init__(self, members):
+        super().__init__()
+        self.members = nn.ModuleList(members)
+
+    def forward(self, x):
+        p = torch.stack([torch.softmax(m(x), 1) for m in self.members]).mean(0)
+        return torch.log(p.clamp_min(1e-12))
 
 
 class Ensemble(nn.Module):
@@ -224,12 +237,12 @@ def evaluate(model, data, idx):
             "dir_calls": float(np.mean(directional)), "dir_precision": dir_prec}
 
 
-def train(make_model, data, fit_idx, stop_idx, label):
+def train(make_model, data, fit_idx, stop_idx, label, seed=SEED):
     # Seed before constructing: weight initialisation draws from the global generator, whose
     # starting state differs between processes
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     model = make_model()
-    rng = np.random.default_rng(SEED)
+    rng = np.random.default_rng(seed)
     criterion = nn.CrossEntropyLoss(weight=class_weights(data.targets[fit_idx]))
     opt = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
     y_stop = torch.from_numpy(data.targets[stop_idx]).long()
@@ -277,12 +290,21 @@ def calibrate(model, data, idx, n_inputs):
     return Calibrated(model, t, bias.detach() - bias.detach().mean(), n_inputs).eval(), t
 
 
-def export(nets, combine, cfg, name):
-    write_native(MODEL_DIR / f"{name}.weights", nets, combine)
+def export(groups, combine, cfg, name):
+    write_native(MODEL_DIR / f"{name}.weights", groups, combine)
     cfg.write(MODEL_DIR / f"{name}_config.txt")
 
 
-def train_and_export(val_ts=None, test_ts=None):
+def train_seeds(make_model, data, fit, inner, label, n_inputs, seeds):
+    """Train and calibrate one model per random start."""
+    members = []
+    for k in range(seeds):
+        model = train(make_model, data, fit, inner, f"{label} #{k + 1}", seed=SEED + k)
+        members.append(calibrate(model, data, inner, n_inputs)[0])
+    return members
+
+
+def train_and_export(val_ts=None, test_ts=None, seeds=SEEDS):
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     print(f"[+] Loading {CSV_FILE}")
     df = load_ticks()
@@ -311,8 +333,8 @@ def train_and_export(val_ts=None, test_ts=None):
     test = raw.split(test_ts, np.inf)
     print(f"[+] Samples: {len(fit)} fit | {len(inner)} inner | {len(val)} val | {len(test)} test")
 
-    print("[+] Training (all choices on the inner split):")
-    gru_raw = train(lambda: QuantGRU(raw.dim), raw, fit, inner, "gru_raw")
+    print(f"[+] Training (all choices on the inner split; {seeds} random starts per GRU):")
+    raw_members = train_seeds(lambda: QuantGRU(raw.dim), raw, fit, inner, "gru_raw", N_CLASSICAL, seeds)
 
     best_bw, best_loss, qset = None, np.inf, None
     for bw in BANDWIDTHS:
@@ -323,20 +345,19 @@ def train_and_export(val_ts=None, test_ts=None):
             best_bw, best_loss, qset = bw, loss, cand
     qcfg = FeatureConfig(**{**base_cfg.__dict__, "bandwidth": best_bw})
     print(f"[+] Selected quantum bandwidth {best_bw} (inner split)")
-    gru_q = train(lambda: QuantGRU(qset.dim), qset, fit, inner, "gru_quantum")
+    q_members = train_seeds(lambda: QuantGRU(qset.dim), qset, fit, inner, "gru_quantum", qset.dim, seeds)
 
-    cal_raw, t_raw = calibrate(gru_raw, raw, inner, N_CLASSICAL)
-    cal_q, t_q = calibrate(gru_q, qset, inner, qset.dim)
+    cal_raw = SeedAverage(raw_members).eval()
+    cal_q = SeedAverage(q_members).eval()
     ensemble = Ensemble(cal_raw, cal_q).eval()
     veto = RawVeto(cal_q, cal_raw, shorts_only=False).eval()
     veto_short = RawVeto(cal_q, cal_raw, shorts_only=True).eval()
-    print(f"[+] Calibration temperatures: raw {t_raw:.2f}, quantum {t_q:.2f}")
 
-    export([cal_raw], "single", raw_cfg, "baseline_model")
-    export([cal_q], "single", qcfg, "quant_model")
-    export([cal_raw, cal_q], "mean", qcfg, "ensemble_model")
-    export([cal_q, cal_raw], "veto", qcfg, "quant_veto_model")
-    export([cal_q, cal_raw], "veto_short", qcfg, "quant_veto_short_model")
+    export([raw_members], "single", raw_cfg, "baseline_model")
+    export([q_members], "single", qcfg, "quant_model")
+    export([raw_members, q_members], "mean", qcfg, "ensemble_model")
+    export([q_members, raw_members], "veto", qcfg, "quant_veto_model")
+    export([q_members, raw_members], "veto_short", qcfg, "quant_veto_short_model")
 
     majority = int(np.bincount(raw.targets[fit], minlength=3).argmax())
     lines = []
@@ -352,6 +373,14 @@ def train_and_export(val_ts=None, test_ts=None):
             lines.append(f"{name:<16}{r['acc']:>10.3f}{r['macro_f1']:>10.3f}{r['nll']:>8.4f}"
                          f"{100 * r['dir_calls']:>15.1f}%{r['dir_precision']:>16.3f}")
         lines.append(f"class mix (sell/hold/buy): {np.round(np.bincount(raw.targets[idx], minlength=3) / len(idx), 3)}")
+        if seeds > 1:
+            lines.append("single random starts vs their average (nll: lower is better):")
+            for name, members, avg, data in [("gru_raw", raw_members, cal_raw, raw), ("gru_quantum", q_members, cal_q, qset)]:
+                each = [evaluate(m, data, idx) for m in members]
+                r = evaluate(avg, data, idx)
+                lines.append(f"  {name:<12} nll {min(e['nll'] for e in each):.4f}-{max(e['nll'] for e in each):.4f} each, "
+                             f"{r['nll']:.4f} averaged | accuracy {min(e['acc'] for e in each):.3f}-"
+                             f"{max(e['acc'] for e in each):.3f} each, {r['acc']:.3f} averaged")
     lines.append(f"quantum bandwidth {best_bw}")
     report = "\n".join(lines)
     (MODEL_DIR / "training_report.txt").write_text(report + "\n")
@@ -365,6 +394,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-dir", type=Path, default=MODEL_DIR, help="where to write models")
     parser.add_argument("--val-start", type=int, help="first val timestamp; training uses data before it (default: 60%%)")
     parser.add_argument("--test-start", type=int, help="first test timestamp (default: 80%%)")
+    parser.add_argument("--seeds", type=int, default=SEEDS, help=f"random starts per GRU, averaged (default {SEEDS})")
     args = parser.parse_args()
     CSV_FILE, MODEL_DIR = args.data, args.model_dir
-    train_and_export(args.val_start, args.test_start)
+    train_and_export(args.val_start, args.test_start, args.seeds)
