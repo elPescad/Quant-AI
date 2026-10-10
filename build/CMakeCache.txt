@@ -209,6 +209,12 @@ MKLDNN_DIR:PATH=MKLDNN_DIR-NOTFOUND
 //The directory containing a CMake configuration file for MKL.
 MKL_DIR:PATH=MKL_DIR-NOTFOUND
 
+//Value for -march
+QUANT_ARCH:STRING=native
+
+//Link fully static binaries (no shared libraries at runtime)
+QUANT_STATIC:BOOL=OFF
+
 //Path to a library.
 TORCH_LIBRARY:FILEPATH=/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch.so
 

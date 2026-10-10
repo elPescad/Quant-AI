@@ -51,10 +51,9 @@ build cmake_object_order_depends_target_quant_engine: phony || .
 
 build CMakeFiles/quant_engine.dir/src/main.cpp.o: CXX_COMPILER__quant_engine_unscanned_Release /home/elpescad/quant-ml-engine/Quant-AI/src/main.cpp || cmake_object_order_depends_target_quant_engine
   CONFIG = Release
-  DEFINES = -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE
   DEP_FILE = CMakeFiles/quant_engine.dir/src/main.cpp.o.d
-  FLAGS = -O3 -DNDEBUG -O3 -march=native -flto -std=gnu++20
-  INCLUDES = -I/home/elpescad/quant-ml-engine/Quant-AI/src -isystem /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/include -isystem /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/include/torch/csrc/api/include
+  FLAGS = -O3 -DNDEBUG -march=native -fno-math-errno -fno-trapping-math -flto=auto -std=gnu++20
+  INCLUDES = -I/home/elpescad/quant-ml-engine/Quant-AI/src
   OBJECT_DIR = CMakeFiles/quant_engine.dir
   OBJECT_FILE_DIR = CMakeFiles/quant_engine.dir/src
   TARGET_SUPPORT_DIR = CMakeFiles/quant_engine.dir
@@ -67,13 +66,11 @@ build CMakeFiles/quant_engine.dir/src/main.cpp.o: CXX_COMPILER__quant_engine_uns
 #############################################
 # Link the executable quant_engine
 
-build quant_engine: CXX_EXECUTABLE_LINKER__quant_engine_Release CMakeFiles/quant_engine.dir/src/main.cpp.o | /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch.so /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libc10.so /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libc10.so
+build quant_engine: CXX_EXECUTABLE_LINKER__quant_engine_Release CMakeFiles/quant_engine.dir/src/main.cpp.o
   CONFIG = Release
   DEP_FILE = CMakeFiles/quant_engine.dir/link.d
-  FLAGS = -O3 -DNDEBUG -O3 -march=native -flto
+  FLAGS = -O3 -DNDEBUG -march=native -fno-math-errno -fno-trapping-math -flto=auto
   LINK_FLAGS = -Wl,--dependency-file=CMakeFiles/quant_engine.dir/link.d
-  LINK_LIBRARIES = -Wl,-rpath,/lib/intel64:/lib/intel64_win:/lib/win-x64:/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib  /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch.so  /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libc10.so  -Wl,--no-as-needed,"/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch_cpu.so" -Wl,--as-needed  /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libc10.so  -Wl,--no-as-needed,"/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch.so" -Wl,--as-needed
-  LINK_PATH = -L/lib/intel64   -L/lib/intel64_win   -L/lib/win-x64
   OBJECT_DIR = CMakeFiles/quant_engine.dir
   POST_BUILD = :
   PRE_LINK = :
@@ -92,10 +89,9 @@ build cmake_object_order_depends_target_model_runner: phony || .
 
 build CMakeFiles/model_runner.dir/src/model_runner.cpp.o: CXX_COMPILER__model_runner_unscanned_Release /home/elpescad/quant-ml-engine/Quant-AI/src/model_runner.cpp || cmake_object_order_depends_target_model_runner
   CONFIG = Release
-  DEFINES = -DUSE_C10D_GLOO -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE
   DEP_FILE = CMakeFiles/model_runner.dir/src/model_runner.cpp.o.d
-  FLAGS = -O3 -DNDEBUG -O3 -march=native -flto -std=gnu++20
-  INCLUDES = -I/home/elpescad/quant-ml-engine/Quant-AI/src -isystem /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/include -isystem /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/include/torch/csrc/api/include
+  FLAGS = -O3 -DNDEBUG -march=native -fno-math-errno -fno-trapping-math -flto=auto -std=gnu++20
+  INCLUDES = -I/home/elpescad/quant-ml-engine/Quant-AI/src
   OBJECT_DIR = CMakeFiles/model_runner.dir
   OBJECT_FILE_DIR = CMakeFiles/model_runner.dir/src
   TARGET_SUPPORT_DIR = CMakeFiles/model_runner.dir
@@ -108,13 +104,11 @@ build CMakeFiles/model_runner.dir/src/model_runner.cpp.o: CXX_COMPILER__model_ru
 #############################################
 # Link the executable model_runner
 
-build model_runner: CXX_EXECUTABLE_LINKER__model_runner_Release CMakeFiles/model_runner.dir/src/model_runner.cpp.o | /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch.so /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libc10.so /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libc10.so
+build model_runner: CXX_EXECUTABLE_LINKER__model_runner_Release CMakeFiles/model_runner.dir/src/model_runner.cpp.o
   CONFIG = Release
   DEP_FILE = CMakeFiles/model_runner.dir/link.d
-  FLAGS = -O3 -DNDEBUG -O3 -march=native -flto
+  FLAGS = -O3 -DNDEBUG -march=native -fno-math-errno -fno-trapping-math -flto=auto
   LINK_FLAGS = -Wl,--dependency-file=CMakeFiles/model_runner.dir/link.d
-  LINK_LIBRARIES = -Wl,-rpath,/lib/intel64:/lib/intel64_win:/lib/win-x64:/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib  /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch.so  /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libc10.so  -Wl,--no-as-needed,"/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch_cpu.so" -Wl,--as-needed  /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libc10.so  -Wl,--no-as-needed,"/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch.so" -Wl,--as-needed
-  LINK_PATH = -L/lib/intel64   -L/lib/intel64_win   -L/lib/win-x64
   OBJECT_DIR = CMakeFiles/model_runner.dir
   POST_BUILD = :
   PRE_LINK = :
@@ -134,7 +128,7 @@ build cmake_object_order_depends_target_engine_tests: phony || .
 build CMakeFiles/engine_tests.dir/tests/engine_tests.cpp.o: CXX_COMPILER__engine_tests_unscanned_Release /home/elpescad/quant-ml-engine/Quant-AI/tests/engine_tests.cpp || cmake_object_order_depends_target_engine_tests
   CONFIG = Release
   DEP_FILE = CMakeFiles/engine_tests.dir/tests/engine_tests.cpp.o.d
-  FLAGS = -O3 -DNDEBUG -O3 -march=native -flto -std=gnu++20
+  FLAGS = -O3 -DNDEBUG -march=native -fno-math-errno -fno-trapping-math -flto=auto -std=gnu++20
   INCLUDES = -I/home/elpescad/quant-ml-engine/Quant-AI/src
   OBJECT_DIR = CMakeFiles/engine_tests.dir
   OBJECT_FILE_DIR = CMakeFiles/engine_tests.dir/tests
@@ -151,7 +145,7 @@ build CMakeFiles/engine_tests.dir/tests/engine_tests.cpp.o: CXX_COMPILER__engine
 build engine_tests: CXX_EXECUTABLE_LINKER__engine_tests_Release CMakeFiles/engine_tests.dir/tests/engine_tests.cpp.o
   CONFIG = Release
   DEP_FILE = CMakeFiles/engine_tests.dir/link.d
-  FLAGS = -O3 -DNDEBUG -O3 -march=native -flto
+  FLAGS = -O3 -DNDEBUG -march=native -fno-math-errno -fno-trapping-math -flto=auto
   LINK_FLAGS = -Wl,--dependency-file=CMakeFiles/engine_tests.dir/link.d
   OBJECT_DIR = CMakeFiles/engine_tests.dir
   POST_BUILD = :
@@ -216,14 +210,14 @@ build all: phony quant_engine model_runner engine_tests
 #############################################
 # Re-run CMake if any of its inputs changed.
 
-build build.ninja /home/elpescad/quant-ml-engine/Quant-AI/build/cmake_install.cmake /home/elpescad/quant-ml-engine/Quant-AI/build/CTestTestfile.cmake: RERUN_CMAKE | /home/elpescad/quant-ml-engine/Quant-AI/CMakeLists.txt /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/Caffe2Config.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/Caffe2Targets-release.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/Caffe2Targets.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/public/mkl.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/public/mkldnn.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/public/utils.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Torch/TorchConfig.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Torch/TorchConfigVersion.cmake /usr/share/cmake/Modules/CMakeCXXInformation.cmake /usr/share/cmake/Modules/CMakeCheckCompilerFlagCommonPatterns.cmake /usr/share/cmake/Modules/CMakeCommonLanguageInclude.cmake /usr/share/cmake/Modules/CMakeFindDependencyMacro.cmake /usr/share/cmake/Modules/CMakeGenericSystem.cmake /usr/share/cmake/Modules/CMakeInitializeConfigs.cmake /usr/share/cmake/Modules/CMakeLanguageInformation.cmake /usr/share/cmake/Modules/CMakeSystemSpecificInformation.cmake /usr/share/cmake/Modules/CMakeSystemSpecificInitialize.cmake /usr/share/cmake/Modules/CheckCCompilerFlag.cmake /usr/share/cmake/Modules/CheckCSourceCompiles.cmake /usr/share/cmake/Modules/CheckCXXCompilerFlag.cmake /usr/share/cmake/Modules/CheckCXXSourceCompiles.cmake /usr/share/cmake/Modules/CheckIncludeFileCXX.cmake /usr/share/cmake/Modules/CheckLibraryExists.cmake /usr/share/cmake/Modules/CheckLinkerFlag.cmake /usr/share/cmake/Modules/Compiler/CMakeCommonCompilerMacros.cmake /usr/share/cmake/Modules/Compiler/GNU-CXX.cmake /usr/share/cmake/Modules/Compiler/GNU.cmake /usr/share/cmake/Modules/FindPackageHandleStandardArgs.cmake /usr/share/cmake/Modules/FindPackageMessage.cmake /usr/share/cmake/Modules/FindPython/Support.cmake /usr/share/cmake/Modules/FindPython3.cmake /usr/share/cmake/Modules/FindThreads.cmake /usr/share/cmake/Modules/Internal/CMakeCXXLinkerInformation.cmake /usr/share/cmake/Modules/Internal/CMakeCommonLinkerInformation.cmake /usr/share/cmake/Modules/Internal/CheckCommon.cmake /usr/share/cmake/Modules/Internal/CheckCompilerFlag.cmake /usr/share/cmake/Modules/Internal/CheckFlagCommonConfig.cmake /usr/share/cmake/Modules/Internal/CheckLinkerFlag.cmake /usr/share/cmake/Modules/Internal/CheckSourceCompiles.cmake /usr/share/cmake/Modules/Linker/GNU-CXX.cmake /usr/share/cmake/Modules/Linker/GNU.cmake /usr/share/cmake/Modules/Platform/Linker/GNU.cmake /usr/share/cmake/Modules/Platform/Linker/Linux-GNU-CXX.cmake /usr/share/cmake/Modules/Platform/Linker/Linux-GNU.cmake /usr/share/cmake/Modules/Platform/Linux-GNU-CXX.cmake /usr/share/cmake/Modules/Platform/Linux-GNU.cmake /usr/share/cmake/Modules/Platform/Linux-Initialize.cmake /usr/share/cmake/Modules/Platform/Linux.cmake /usr/share/cmake/Modules/Platform/UnixPaths.cmake CMakeCache.txt CMakeFiles/4.4.4/CMakeCXXCompiler.cmake CMakeFiles/4.4.4/CMakeSystem.cmake
+build build.ninja /home/elpescad/quant-ml-engine/Quant-AI/build/cmake_install.cmake /home/elpescad/quant-ml-engine/Quant-AI/build/CTestTestfile.cmake: RERUN_CMAKE | /home/elpescad/quant-ml-engine/Quant-AI/CMakeLists.txt /usr/share/cmake/Modules/CMakeCXXInformation.cmake /usr/share/cmake/Modules/CMakeCommonLanguageInclude.cmake /usr/share/cmake/Modules/CMakeGenericSystem.cmake /usr/share/cmake/Modules/CMakeInitializeConfigs.cmake /usr/share/cmake/Modules/CMakeLanguageInformation.cmake /usr/share/cmake/Modules/CMakeSystemSpecificInformation.cmake /usr/share/cmake/Modules/CMakeSystemSpecificInitialize.cmake /usr/share/cmake/Modules/CheckCXXSourceCompiles.cmake /usr/share/cmake/Modules/CheckIncludeFileCXX.cmake /usr/share/cmake/Modules/CheckLibraryExists.cmake /usr/share/cmake/Modules/Compiler/CMakeCommonCompilerMacros.cmake /usr/share/cmake/Modules/Compiler/GNU-CXX.cmake /usr/share/cmake/Modules/Compiler/GNU.cmake /usr/share/cmake/Modules/FindPackageHandleStandardArgs.cmake /usr/share/cmake/Modules/FindPackageMessage.cmake /usr/share/cmake/Modules/FindThreads.cmake /usr/share/cmake/Modules/Internal/CMakeCXXLinkerInformation.cmake /usr/share/cmake/Modules/Internal/CMakeCommonLinkerInformation.cmake /usr/share/cmake/Modules/Internal/CheckCommon.cmake /usr/share/cmake/Modules/Internal/CheckSourceCompiles.cmake /usr/share/cmake/Modules/Linker/GNU-CXX.cmake /usr/share/cmake/Modules/Linker/GNU.cmake /usr/share/cmake/Modules/Platform/Linker/GNU.cmake /usr/share/cmake/Modules/Platform/Linker/Linux-GNU-CXX.cmake /usr/share/cmake/Modules/Platform/Linker/Linux-GNU.cmake /usr/share/cmake/Modules/Platform/Linux-GNU-CXX.cmake /usr/share/cmake/Modules/Platform/Linux-GNU.cmake /usr/share/cmake/Modules/Platform/Linux-Initialize.cmake /usr/share/cmake/Modules/Platform/Linux.cmake /usr/share/cmake/Modules/Platform/UnixPaths.cmake CMakeCache.txt CMakeFiles/4.4.4/CMakeCXXCompiler.cmake CMakeFiles/4.4.4/CMakeSystem.cmake
   pool = console
 
 
 #############################################
 # A missing CMake input file is not an error.
 
-build /home/elpescad/quant-ml-engine/Quant-AI/CMakeLists.txt /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/Caffe2Config.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/Caffe2Targets-release.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/Caffe2Targets.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/public/mkl.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/public/mkldnn.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2/public/utils.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Torch/TorchConfig.cmake /home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Torch/TorchConfigVersion.cmake /usr/share/cmake/Modules/CMakeCXXInformation.cmake /usr/share/cmake/Modules/CMakeCheckCompilerFlagCommonPatterns.cmake /usr/share/cmake/Modules/CMakeCommonLanguageInclude.cmake /usr/share/cmake/Modules/CMakeFindDependencyMacro.cmake /usr/share/cmake/Modules/CMakeGenericSystem.cmake /usr/share/cmake/Modules/CMakeInitializeConfigs.cmake /usr/share/cmake/Modules/CMakeLanguageInformation.cmake /usr/share/cmake/Modules/CMakeSystemSpecificInformation.cmake /usr/share/cmake/Modules/CMakeSystemSpecificInitialize.cmake /usr/share/cmake/Modules/CheckCCompilerFlag.cmake /usr/share/cmake/Modules/CheckCSourceCompiles.cmake /usr/share/cmake/Modules/CheckCXXCompilerFlag.cmake /usr/share/cmake/Modules/CheckCXXSourceCompiles.cmake /usr/share/cmake/Modules/CheckIncludeFileCXX.cmake /usr/share/cmake/Modules/CheckLibraryExists.cmake /usr/share/cmake/Modules/CheckLinkerFlag.cmake /usr/share/cmake/Modules/Compiler/CMakeCommonCompilerMacros.cmake /usr/share/cmake/Modules/Compiler/GNU-CXX.cmake /usr/share/cmake/Modules/Compiler/GNU.cmake /usr/share/cmake/Modules/FindPackageHandleStandardArgs.cmake /usr/share/cmake/Modules/FindPackageMessage.cmake /usr/share/cmake/Modules/FindPython/Support.cmake /usr/share/cmake/Modules/FindPython3.cmake /usr/share/cmake/Modules/FindThreads.cmake /usr/share/cmake/Modules/Internal/CMakeCXXLinkerInformation.cmake /usr/share/cmake/Modules/Internal/CMakeCommonLinkerInformation.cmake /usr/share/cmake/Modules/Internal/CheckCommon.cmake /usr/share/cmake/Modules/Internal/CheckCompilerFlag.cmake /usr/share/cmake/Modules/Internal/CheckFlagCommonConfig.cmake /usr/share/cmake/Modules/Internal/CheckLinkerFlag.cmake /usr/share/cmake/Modules/Internal/CheckSourceCompiles.cmake /usr/share/cmake/Modules/Linker/GNU-CXX.cmake /usr/share/cmake/Modules/Linker/GNU.cmake /usr/share/cmake/Modules/Platform/Linker/GNU.cmake /usr/share/cmake/Modules/Platform/Linker/Linux-GNU-CXX.cmake /usr/share/cmake/Modules/Platform/Linker/Linux-GNU.cmake /usr/share/cmake/Modules/Platform/Linux-GNU-CXX.cmake /usr/share/cmake/Modules/Platform/Linux-GNU.cmake /usr/share/cmake/Modules/Platform/Linux-Initialize.cmake /usr/share/cmake/Modules/Platform/Linux.cmake /usr/share/cmake/Modules/Platform/UnixPaths.cmake CMakeCache.txt CMakeFiles/4.4.4/CMakeCXXCompiler.cmake CMakeFiles/4.4.4/CMakeSystem.cmake: phony
+build /home/elpescad/quant-ml-engine/Quant-AI/CMakeLists.txt /usr/share/cmake/Modules/CMakeCXXInformation.cmake /usr/share/cmake/Modules/CMakeCommonLanguageInclude.cmake /usr/share/cmake/Modules/CMakeGenericSystem.cmake /usr/share/cmake/Modules/CMakeInitializeConfigs.cmake /usr/share/cmake/Modules/CMakeLanguageInformation.cmake /usr/share/cmake/Modules/CMakeSystemSpecificInformation.cmake /usr/share/cmake/Modules/CMakeSystemSpecificInitialize.cmake /usr/share/cmake/Modules/CheckCXXSourceCompiles.cmake /usr/share/cmake/Modules/CheckIncludeFileCXX.cmake /usr/share/cmake/Modules/CheckLibraryExists.cmake /usr/share/cmake/Modules/Compiler/CMakeCommonCompilerMacros.cmake /usr/share/cmake/Modules/Compiler/GNU-CXX.cmake /usr/share/cmake/Modules/Compiler/GNU.cmake /usr/share/cmake/Modules/FindPackageHandleStandardArgs.cmake /usr/share/cmake/Modules/FindPackageMessage.cmake /usr/share/cmake/Modules/FindThreads.cmake /usr/share/cmake/Modules/Internal/CMakeCXXLinkerInformation.cmake /usr/share/cmake/Modules/Internal/CMakeCommonLinkerInformation.cmake /usr/share/cmake/Modules/Internal/CheckCommon.cmake /usr/share/cmake/Modules/Internal/CheckSourceCompiles.cmake /usr/share/cmake/Modules/Linker/GNU-CXX.cmake /usr/share/cmake/Modules/Linker/GNU.cmake /usr/share/cmake/Modules/Platform/Linker/GNU.cmake /usr/share/cmake/Modules/Platform/Linker/Linux-GNU-CXX.cmake /usr/share/cmake/Modules/Platform/Linker/Linux-GNU.cmake /usr/share/cmake/Modules/Platform/Linux-GNU-CXX.cmake /usr/share/cmake/Modules/Platform/Linux-GNU.cmake /usr/share/cmake/Modules/Platform/Linux-Initialize.cmake /usr/share/cmake/Modules/Platform/Linux.cmake /usr/share/cmake/Modules/Platform/UnixPaths.cmake CMakeCache.txt CMakeFiles/4.4.4/CMakeCXXCompiler.cmake CMakeFiles/4.4.4/CMakeSystem.cmake: phony
 
 
 #############################################
