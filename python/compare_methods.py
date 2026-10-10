@@ -146,7 +146,7 @@ def main():
                    help="online learning rates to compare, e.g. 0 0.001 0.003 (0 = off; no retraining needed)")
     p.add_argument("--min-trades", type=float, default=5.0, help="minimum average round trips per fold to be selectable")
     p.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1), help="parallel backtests")
-    p.add_argument("--skip-train", action="store_true", help="reuse models already in <workdir>")
+    p.add_argument("--skip-train", action="store_true", help="reuse models already in <workdir>; train only missing folds")
     a = p.parse_args()
     if a.folds < 2:
         sys.exit("[-] --folds must be at least 2 (the score needs a spread across folds)")
@@ -163,16 +163,26 @@ def main():
     print(f"[+] {len(timeline)} bars | {a.folds} walk-forward folds from {edges[0]} | test from {test_start}")
     print(f"[+] {len(candidates)} candidates: {', '.join(MODELS)} x gamma {a.gammas} x online lr {a.online_lrs}")
 
+    # Fail now, not after an hour of training, if the engine binary predates a flag we need
+    if not engine.exists():
+        sys.exit(f"[-] {engine} not found: build it with  cmake -S . -B build && cmake --build build")
+    usage = subprocess.run([str(engine), "--help"], capture_output=True, text=True).stdout
+    if any(lr > 0 for lr in a.online_lrs) and "--online-lr" not in usage:
+        sys.exit(f"[-] {engine} is older than the code (no --online-lr): rebuild it with  cmake --build build")
+
+    def need_training(model_dir):
+        return not (a.skip_train and (model_dir / "ensemble_model.weights").exists())
+
     fold_results = []
     for k in range(a.folds):
         fold_dir = workdir / f"fold{k + 1}"
-        if not a.skip_train:
+        if need_training(fold_dir / "models"):
             train(data, fold_dir / "models", edges[k], edges[k + 1], fold_dir / "train.log", a.seeds)
         print(f"    fold {k + 1}: backtesting [{edges[k]}, {edges[k + 1]})", flush=True)
         fold_results.append(run_all(a.jobs, engine, data, fold_dir / "models", candidates, edges[k], edges[k + 1], fold_dir))
 
     final_dir = workdir / "final"
-    if not a.skip_train:
+    if need_training(final_dir / "models"):
         train(data, final_dir / "models", test_start, test_start, final_dir / "train.log", a.seeds)
     print(f"    test: backtesting [{test_start}, end)", flush=True)
     test = run_all(a.jobs, engine, data, final_dir / "models", candidates, test_start, None, final_dir)
