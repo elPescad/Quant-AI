@@ -1,8 +1,13 @@
-Held-out test split (5964 samples, timestamps >= 1736940000)
-model             accuracy  macro_f1  buy/sell calls  call precision
-linear_raw           0.466     0.332          100.0%           0.466
-linear_quantum       0.466     0.332          100.0%           0.466
-gru_raw              0.476     0.322          100.0%           0.476
-gru_quantum          0.469     0.333          100.0%           0.469
-class mix (sell/hold/buy): [0.45187793 0.13061704 0.41750503]
-quantum bandwidth 0.1, TorchScript export max |diff| 0.00e+00
+test split (11662 samples)
+model             accuracy  macro_f1     nll  buy/sell calls  call precision
+always_buy           0.422
+gru_raw              0.410     0.283  1.0313          100.0%           0.410
+gru_quantum          0.419     0.303  1.0295          100.0%           0.419
+ensemble             0.416     0.295  1.0299          100.0%           0.416
+q_veto               0.352     0.321  7.4169           69.9%           0.420
+q_veto_short         0.398     0.328  2.9193           91.5%           0.421
+class mix (sell/hold/buy): [0.4   0.178 0.422]
+single random starts vs their average (nll: lower is better):
+  gru_raw      nll 1.0311-1.0318 each, 1.0313 averaged | accuracy 0.412-0.414 each, 0.410 averaged
+  gru_quantum  nll 1.0299-1.0320 each, 1.0295 averaged | accuracy 0.407-0.414 each, 0.419 averaged
+quantum bandwidth 0.25

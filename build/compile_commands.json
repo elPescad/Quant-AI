@@ -1,7 +1,7 @@
 [
 {
   "directory": "/home/elpescad/quant-ml-engine/Quant-AI/build",
-  "command": "/usr/bin/c++ -I/home/elpescad/quant-ml-engine/Quant-AI/src -O3 -DNDEBUG -march=native -fno-math-errno -fno-trapping-math -flto=auto -std=gnu++20 -o CMakeFiles/quant_engine.dir/src/main.cpp.o -c /home/elpescad/quant-ml-engine/Quant-AI/src/main.cpp",
+  "command": "/usr/bin/c++ -DQUANT_LIVE=1 -I/home/elpescad/quant-ml-engine/Quant-AI/src -O3 -DNDEBUG -march=native -fno-math-errno -fno-trapping-math -flto=auto -std=gnu++20 -o CMakeFiles/quant_engine.dir/src/main.cpp.o -c /home/elpescad/quant-ml-engine/Quant-AI/src/main.cpp",
   "file": "/home/elpescad/quant-ml-engine/Quant-AI/src/main.cpp",
   "output": "/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/quant_engine.dir/src/main.cpp.o"
 },

@@ -3878,3 +3878,1145 @@ events:
         
       exitCode: 0
 ...
+
+---
+events:
+  -
+    kind: "find_package-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindCURL.cmake:174 (find_package)"
+      - "CMakeLists.txt:42 (find_package)"
+    name: "CURL"
+    configs:
+      -
+        filename: "CURL.cps"
+        kind: "cps"
+      -
+        filename: "curl.cps"
+        kind: "cps"
+      -
+        filename: "CURLConfig.cmake"
+        kind: "cmake"
+      -
+        filename: "curl-config.cmake"
+        kind: "cmake"
+    version_request:
+      exact: false
+    settings:
+      required: "optional"
+      quiet: true
+      global: false
+      policy_scope: true
+      bypass_provider: false
+      names:
+        - "CURL"
+      path_suffixes:
+        - ""
+      paths:
+        CMAKE_FIND_USE_CMAKE_PATH: true
+        CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+        CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+        CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+        CMAKE_FIND_USE_INSTALL_PREFIX: true
+        CMAKE_FIND_USE_PACKAGE_ROOT_PATH: true
+        CMAKE_FIND_USE_CMAKE_PACKAGE_REGISTRY: true
+        CMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY: true
+        CMAKE_FIND_ROOT_PATH_MODE: "BOTH"
+    candidates:
+      -
+        path: "/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/pkgRedirects/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/pkgRedirects/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/pkgRedirects/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/pkgRedirects/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/pkgRedirects/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/pkgRedirects/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/quant-ml-engine/venv/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.nvm/versions/node/v24.16.0/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.nvm/versions/node/v24.16.0/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.nvm/versions/node/v24.16.0/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.nvm/versions/node/v24.16.0/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.nvm/versions/node/v24.16.0/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.nvm/versions/node/v24.16.0/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.cargo/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.cargo/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.cargo/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.cargo/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.cargo/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.cargo/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/local/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/local/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/local/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/local/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/local/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/local/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/var/lib/flatpak/exports/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/var/lib/flatpak/exports/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/var/lib/flatpak/exports/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/var/lib/flatpak/exports/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/var/lib/flatpak/exports/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/var/lib/flatpak/exports/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/default/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/default/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/default/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/default/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/default/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/default/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/site_perl/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/site_perl/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/site_perl/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/site_perl/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/site_perl/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/site_perl/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/vendor_perl/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/vendor_perl/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/vendor_perl/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/vendor_perl/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/vendor_perl/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/vendor_perl/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/core_perl/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/core_perl/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/core_perl/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/core_perl/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/core_perl/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/bin/core_perl/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/rustup/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/rustup/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/rustup/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/rustup/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/rustup/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/rustup/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/emulator/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/emulator/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/emulator/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/emulator/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/emulator/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/emulator/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/platform-tools/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/platform-tools/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/platform-tools/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/platform-tools/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/platform-tools/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/platform-tools/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/build-tools/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/build-tools/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/build-tools/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/build-tools/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/build-tools/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/home/elpescad/shared/Android/Sdk/build-tools/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/java-17-openjdk/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/java-17-openjdk/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/java-17-openjdk/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/java-17-openjdk/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/java-17-openjdk/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/lib/jvm/java-17-openjdk/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/opt/CURLConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/curl-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/lib/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/opt/lib/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/opt/share/cps/CURL.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/opt/share/cps/curl.cps"
+        mode: "cps"
+        reason: "no_exist"
+    found: null
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake"
+      ENV{PATH}:
+        - "/home/elpescad/quant-ml-engine/venv/bin"
+        - "/home/elpescad/.nvm/versions/node/v24.16.0/bin"
+        - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin"
+        - "/home/elpescad/.cargo/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/var/lib/flatpak/exports/bin"
+        - "/usr/lib/jvm/default/bin"
+        - "/usr/bin/site_perl"
+        - "/usr/bin/vendor_perl"
+        - "/usr/bin/core_perl"
+        - "/usr/lib/rustup/bin"
+        - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts"
+        - "/home/elpescad/shared/Android/Sdk/emulator"
+        - "/home/elpescad/shared/Android/Sdk/platform-tools"
+        - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin"
+        - "/home/elpescad/shared/Android/Sdk/build-tools"
+        - "/usr/lib/jvm/java-17-openjdk/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:517 (find_program)"
+      - "/usr/share/cmake/Modules/FindCURL.cmake:189 (find_package)"
+      - "CMakeLists.txt:42 (find_package)"
+    mode: "program"
+    variable: "PKG_CONFIG_EXECUTABLE"
+    description: "pkg-config executable"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "pkg-config"
+      - "pkgconf"
+    candidate_directories:
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/bin/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/sbin/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/home/elpescad/quant-ml-engine/venv/bin/"
+      - "/home/elpescad/.nvm/versions/node/v24.16.0/bin/"
+      - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin/"
+      - "/home/elpescad/.cargo/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/bin/"
+      - "/var/lib/flatpak/exports/bin/"
+      - "/usr/lib/jvm/default/bin/"
+      - "/usr/bin/site_perl/"
+      - "/usr/bin/vendor_perl/"
+      - "/usr/bin/core_perl/"
+      - "/usr/lib/rustup/bin/"
+      - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/"
+      - "/home/elpescad/shared/Android/Sdk/emulator/"
+      - "/home/elpescad/shared/Android/Sdk/platform-tools/"
+      - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin/"
+      - "/home/elpescad/shared/Android/Sdk/build-tools/"
+      - "/usr/lib/jvm/java-17-openjdk/bin/"
+      - "/usr/local/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/"
+      - "/usr/bin/"
+      - "/usr/sbin/"
+      - "/usr/"
+      - "/bin/"
+      - "/sbin/"
+      - "/usr/X11R6/bin/"
+      - "/usr/X11R6/sbin/"
+      - "/usr/X11R6/"
+      - "/usr/pkg/bin/"
+      - "/usr/pkg/sbin/"
+      - "/usr/pkg/"
+      - "/opt/bin/"
+      - "/opt/sbin/"
+      - "/opt/"
+    searched_directories:
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/bin/pkg-config"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/bin/pkgconf"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/sbin/pkg-config"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/sbin/pkgconf"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/pkg-config"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/pkgconf"
+      - "/home/elpescad/quant-ml-engine/venv/bin/pkg-config"
+      - "/home/elpescad/quant-ml-engine/venv/bin/pkgconf"
+      - "/home/elpescad/.nvm/versions/node/v24.16.0/bin/pkg-config"
+      - "/home/elpescad/.nvm/versions/node/v24.16.0/bin/pkgconf"
+      - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin/pkg-config"
+      - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin/pkgconf"
+      - "/home/elpescad/.cargo/bin/pkg-config"
+      - "/home/elpescad/.cargo/bin/pkgconf"
+      - "/usr/local/sbin/pkg-config"
+      - "/usr/local/sbin/pkgconf"
+      - "/usr/local/bin/pkg-config"
+      - "/usr/local/bin/pkgconf"
+    found: "/usr/bin/pkg-config"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake"
+      ENV{PATH}:
+        - "/home/elpescad/quant-ml-engine/venv/bin"
+        - "/home/elpescad/.nvm/versions/node/v24.16.0/bin"
+        - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin"
+        - "/home/elpescad/.cargo/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/var/lib/flatpak/exports/bin"
+        - "/usr/lib/jvm/default/bin"
+        - "/usr/bin/site_perl"
+        - "/usr/bin/vendor_perl"
+        - "/usr/bin/core_perl"
+        - "/usr/lib/rustup/bin"
+        - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts"
+        - "/home/elpescad/shared/Android/Sdk/emulator"
+        - "/home/elpescad/shared/Android/Sdk/platform-tools"
+        - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin"
+        - "/home/elpescad/shared/Android/Sdk/build-tools"
+        - "/usr/lib/jvm/java-17-openjdk/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:761 (find_library)"
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:811 (_pkg_find_libs)"
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:1149 (_pkg_recalculate)"
+      - "/usr/share/cmake/Modules/FindPkgConfig.cmake:1166 (_pkg_check_modules_internal)"
+      - "/usr/share/cmake/Modules/FindCURL.cmake:191 (pkg_check_modules)"
+      - "CMakeLists.txt:42 (find_package)"
+    mode: "library"
+    variable: "pkgcfg_lib_PC_CURL_curl"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "curl"
+    candidate_directories:
+      - "/usr/lib/"
+    found: "/usr/lib/libcurl.so"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake"
+      ENV{PATH}:
+        - "/home/elpescad/quant-ml-engine/venv/bin"
+        - "/home/elpescad/.nvm/versions/node/v24.16.0/bin"
+        - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin"
+        - "/home/elpescad/.cargo/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/var/lib/flatpak/exports/bin"
+        - "/usr/lib/jvm/default/bin"
+        - "/usr/bin/site_perl"
+        - "/usr/bin/vendor_perl"
+        - "/usr/bin/core_perl"
+        - "/usr/lib/rustup/bin"
+        - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts"
+        - "/home/elpescad/shared/Android/Sdk/emulator"
+        - "/home/elpescad/shared/Android/Sdk/platform-tools"
+        - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin"
+        - "/home/elpescad/shared/Android/Sdk/build-tools"
+        - "/usr/lib/jvm/java-17-openjdk/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/lib/X11"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindCURL.cmake:201 (find_path)"
+      - "CMakeLists.txt:42 (find_package)"
+    mode: "path"
+    variable: "CURL_INCLUDE_DIR"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "curl/curl.h"
+    candidate_directories:
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/include/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/usr/include/"
+      - "/home/elpescad/quant-ml-engine/venv/bin/"
+      - "/home/elpescad/.nvm/versions/node/v24.16.0/bin/"
+      - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin/"
+      - "/home/elpescad/.cargo/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/bin/"
+      - "/var/lib/flatpak/exports/bin/"
+      - "/usr/lib/jvm/default/bin/"
+      - "/usr/bin/site_perl/"
+      - "/usr/bin/vendor_perl/"
+      - "/usr/bin/core_perl/"
+      - "/usr/lib/rustup/bin/"
+      - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/"
+      - "/home/elpescad/shared/Android/Sdk/emulator/"
+      - "/home/elpescad/shared/Android/Sdk/platform-tools/"
+      - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin/"
+      - "/home/elpescad/shared/Android/Sdk/build-tools/"
+      - "/usr/lib/jvm/java-17-openjdk/bin/"
+      - "/usr/local/include/"
+      - "/usr/local/"
+      - "/usr/include/"
+      - "/usr/"
+      - "/include/"
+      - "/usr/X11R6/include/"
+      - "/usr/X11R6/"
+      - "/usr/pkg/include/"
+      - "/usr/pkg/"
+      - "/opt/include/"
+      - "/opt/"
+      - "/usr/include/X11/"
+    searched_directories:
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/include/curl/curl.h"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/curl/curl.h"
+    found: "/usr/include/"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake"
+      ENV{PATH}:
+        - "/home/elpescad/quant-ml-engine/venv/bin"
+        - "/home/elpescad/.nvm/versions/node/v24.16.0/bin"
+        - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin"
+        - "/home/elpescad/.cargo/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/var/lib/flatpak/exports/bin"
+        - "/usr/lib/jvm/default/bin"
+        - "/usr/bin/site_perl"
+        - "/usr/bin/vendor_perl"
+        - "/usr/bin/core_perl"
+        - "/usr/lib/rustup/bin"
+        - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts"
+        - "/home/elpescad/shared/Android/Sdk/emulator"
+        - "/home/elpescad/shared/Android/Sdk/platform-tools"
+        - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin"
+        - "/home/elpescad/shared/Android/Sdk/build-tools"
+        - "/usr/lib/jvm/java-17-openjdk/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+      CMAKE_SYSTEM_INCLUDE_PATH:
+        - "/usr/include/X11"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindCURL.cmake:208 (find_library)"
+      - "CMakeLists.txt:42 (find_package)"
+    mode: "library"
+    variable: "CURL_LIBRARY_RELEASE"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "curl"
+      - "curllib"
+      - "libcurl_imp"
+      - "curllib_static"
+      - "libcurl"
+      - "libcurl_a"
+    candidate_directories:
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/usr/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/bin/"
+      - "/home/elpescad/.nvm/versions/node/v24.16.0/bin/"
+      - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin/"
+      - "/home/elpescad/.cargo/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/bin/"
+      - "/var/lib/flatpak/exports/bin/"
+      - "/usr/lib/jvm/default/bin/"
+      - "/usr/bin/site_perl/"
+      - "/usr/bin/vendor_perl/"
+      - "/usr/bin/core_perl/"
+      - "/usr/lib/rustup/bin/"
+      - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/"
+      - "/home/elpescad/shared/Android/Sdk/emulator/"
+      - "/home/elpescad/shared/Android/Sdk/platform-tools/"
+      - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin/"
+      - "/home/elpescad/shared/Android/Sdk/build-tools/"
+      - "/usr/lib/jvm/java-17-openjdk/bin/"
+      - "/usr/local/lib/"
+      - "/usr/local/"
+      - "/usr/lib/"
+      - "/usr/"
+      - "/lib/"
+      - "/usr/X11R6/lib/"
+      - "/usr/X11R6/"
+      - "/usr/pkg/lib/"
+      - "/usr/pkg/"
+      - "/opt/lib/"
+      - "/opt/"
+      - "/usr/lib/X11/"
+    searched_directories:
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+    found: "/usr/lib/libcurl.so"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake"
+      ENV{PATH}:
+        - "/home/elpescad/quant-ml-engine/venv/bin"
+        - "/home/elpescad/.nvm/versions/node/v24.16.0/bin"
+        - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin"
+        - "/home/elpescad/.cargo/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/var/lib/flatpak/exports/bin"
+        - "/usr/lib/jvm/default/bin"
+        - "/usr/bin/site_perl"
+        - "/usr/bin/vendor_perl"
+        - "/usr/bin/core_perl"
+        - "/usr/lib/rustup/bin"
+        - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts"
+        - "/home/elpescad/shared/Android/Sdk/emulator"
+        - "/home/elpescad/shared/Android/Sdk/platform-tools"
+        - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin"
+        - "/home/elpescad/shared/Android/Sdk/build-tools"
+        - "/usr/lib/jvm/java-17-openjdk/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/lib/X11"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/FindCURL.cmake:223 (find_library)"
+      - "CMakeLists.txt:42 (find_package)"
+    mode: "library"
+    variable: "CURL_LIBRARY_DEBUG"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "libcurl-d_imp"
+      - "libcurl-d"
+    candidate_directories:
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/usr/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/bin/"
+      - "/home/elpescad/.nvm/versions/node/v24.16.0/bin/"
+      - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin/"
+      - "/home/elpescad/.cargo/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/bin/"
+      - "/var/lib/flatpak/exports/bin/"
+      - "/usr/lib/jvm/default/bin/"
+      - "/usr/bin/site_perl/"
+      - "/usr/bin/vendor_perl/"
+      - "/usr/bin/core_perl/"
+      - "/usr/lib/rustup/bin/"
+      - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/"
+      - "/home/elpescad/shared/Android/Sdk/emulator/"
+      - "/home/elpescad/shared/Android/Sdk/platform-tools/"
+      - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin/"
+      - "/home/elpescad/shared/Android/Sdk/build-tools/"
+      - "/usr/lib/jvm/java-17-openjdk/bin/"
+      - "/usr/local/lib/"
+      - "/usr/local/"
+      - "/usr/lib/"
+      - "/usr/"
+      - "/lib/"
+      - "/usr/X11R6/lib/"
+      - "/usr/X11R6/"
+      - "/usr/pkg/lib/"
+      - "/usr/pkg/"
+      - "/opt/lib/"
+      - "/opt/"
+      - "/usr/lib/X11/"
+    searched_directories:
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/"
+      - "/usr/lib/"
+      - "/usr/lib/"
+      - "/home/elpescad/quant-ml-engine/venv/bin/"
+      - "/home/elpescad/quant-ml-engine/venv/bin/"
+      - "/home/elpescad/.nvm/versions/node/v24.16.0/bin/"
+      - "/home/elpescad/.nvm/versions/node/v24.16.0/bin/"
+      - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin/"
+      - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin/"
+      - "/home/elpescad/.cargo/bin/"
+      - "/home/elpescad/.cargo/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/local/bin/"
+      - "/usr/bin/"
+      - "/usr/bin/"
+      - "/var/lib/flatpak/exports/bin/"
+      - "/var/lib/flatpak/exports/bin/"
+      - "/usr/lib/jvm/default/bin/"
+      - "/usr/lib/jvm/default/bin/"
+      - "/usr/bin/site_perl/"
+      - "/usr/bin/site_perl/"
+      - "/usr/bin/vendor_perl/"
+      - "/usr/bin/vendor_perl/"
+      - "/usr/bin/core_perl/"
+      - "/usr/bin/core_perl/"
+      - "/usr/lib/rustup/bin/"
+      - "/usr/lib/rustup/bin/"
+      - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/"
+      - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts/"
+      - "/home/elpescad/shared/Android/Sdk/emulator/"
+      - "/home/elpescad/shared/Android/Sdk/emulator/"
+      - "/home/elpescad/shared/Android/Sdk/platform-tools/"
+      - "/home/elpescad/shared/Android/Sdk/platform-tools/"
+      - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin/"
+      - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin/"
+      - "/home/elpescad/shared/Android/Sdk/build-tools/"
+      - "/home/elpescad/shared/Android/Sdk/build-tools/"
+      - "/usr/lib/jvm/java-17-openjdk/bin/"
+      - "/usr/lib/jvm/java-17-openjdk/bin/"
+      - "/usr/local/lib/"
+      - "/usr/local/lib/"
+      - "/usr/local/"
+      - "/usr/local/"
+      - "/usr/lib/"
+      - "/usr/lib/"
+      - "/usr/"
+      - "/usr/"
+      - "/lib/"
+      - "/lib/"
+      - "/usr/X11R6/lib/"
+      - "/usr/X11R6/lib/"
+      - "/usr/X11R6/"
+      - "/usr/X11R6/"
+      - "/usr/pkg/lib/"
+      - "/usr/pkg/lib/"
+      - "/usr/pkg/"
+      - "/usr/pkg/"
+      - "/opt/lib/"
+      - "/opt/lib/"
+      - "/opt/"
+      - "/opt/"
+      - "/usr/lib/X11/"
+      - "/usr/lib/X11/"
+    found: false
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake"
+      ENV{PATH}:
+        - "/home/elpescad/quant-ml-engine/venv/bin"
+        - "/home/elpescad/.nvm/versions/node/v24.16.0/bin"
+        - "/home/elpescad/.vscode/extensions/vadimcn.vscode-lldb-1.12.3/bin"
+        - "/home/elpescad/.cargo/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/var/lib/flatpak/exports/bin"
+        - "/usr/lib/jvm/default/bin"
+        - "/usr/bin/site_perl"
+        - "/usr/bin/vendor_perl"
+        - "/usr/bin/core_perl"
+        - "/usr/lib/rustup/bin"
+        - "/home/elpescad/.vscode/extensions/ms-python.debugpy-2026.6.0-linux-x64/bundled/scripts/noConfigScripts"
+        - "/home/elpescad/shared/Android/Sdk/emulator"
+        - "/home/elpescad/shared/Android/Sdk/platform-tools"
+        - "/home/elpescad/shared/Android/Sdk/cmdline-tools/latest/bin"
+        - "/home/elpescad/shared/Android/Sdk/build-tools"
+        - "/usr/lib/jvm/java-17-openjdk/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local"
+        - "/usr"
+        - "/"
+        - "/usr"
+        - "/usr/local"
+        - "/usr/X11R6"
+        - "/usr/pkg"
+        - "/opt"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/lib/X11"
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/share/cmake/Modules/Internal/CheckSourceCompiles.cmake:81 (try_compile)"
+      - "/usr/share/cmake/Modules/CheckCXXSourceCompiles.cmake:103 (cmake_check_source_compiles)"
+      - "CMakeLists.txt:46 (check_cxx_source_compiles)"
+    checks:
+      - "Performing Test QUANT_CURL_HAS_WEBSOCKETS"
+    directories:
+      source: "/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/CMakeScratch/TryCompile-01zVez"
+      binary: "/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/CMakeScratch/TryCompile-01zVez"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_CXX_STDLIB_MODULES_JSON: ""
+      CMAKE_EXE_LINKER_FLAGS: ""
+    buildResult:
+      variable: "QUANT_CURL_HAS_WEBSOCKETS"
+      cached: true
+      stdout: |
+        Change Dir: '/home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/CMakeScratch/TryCompile-01zVez'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_71229
+        [1/2] /usr/bin/c++ -DQUANT_CURL_HAS_WEBSOCKETS  -std=gnu++20 -o CMakeFiles/cmTC_71229.dir/src.cxx.o -c /home/elpescad/quant-ml-engine/Quant-AI/build/CMakeFiles/CMakeScratch/TryCompile-01zVez/src.cxx
+        [2/2] : && /usr/bin/c++   CMakeFiles/cmTC_71229.dir/src.cxx.o -o cmTC_71229  /usr/lib/libcurl.so  /usr/lib/libcurl.so && :
+        
+      exitCode: 0
+...

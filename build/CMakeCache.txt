@@ -200,6 +200,18 @@ CMAKE_TAPI:FILEPATH=CMAKE_TAPI-NOTFOUND
 // Studio IDE projects all commands are done without /nologo.
 CMAKE_VERBOSE_MAKEFILE:BOOL=FALSE
 
+//The directory containing a CMake configuration file for CURL.
+CURL_DIR:PATH=CURL_DIR-NOTFOUND
+
+//Path to a file.
+CURL_INCLUDE_DIR:PATH=/usr/include
+
+//Path to a library.
+CURL_LIBRARY_DEBUG:FILEPATH=CURL_LIBRARY_DEBUG-NOTFOUND
+
+//Path to a library.
+CURL_LIBRARY_RELEASE:FILEPATH=/usr/lib/libcurl.so
+
 //The directory containing a CMake configuration file for Caffe2.
 Caffe2_DIR:PATH=/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/share/cmake/Caffe2
 
@@ -209,8 +221,18 @@ MKLDNN_DIR:PATH=MKLDNN_DIR-NOTFOUND
 //The directory containing a CMake configuration file for MKL.
 MKL_DIR:PATH=MKL_DIR-NOTFOUND
 
+//Arguments to supply to pkg-config
+PKG_CONFIG_ARGN:STRING=
+
+//pkg-config executable
+PKG_CONFIG_EXECUTABLE:FILEPATH=/usr/bin/pkg-config
+
 //Value for -march
 QUANT_ARCH:STRING=native
+
+//Build the Alpaca live feed into quant_engine (needs libcurl with
+// WebSocket support)
+QUANT_LIVE:BOOL=ON
 
 //Link fully static binaries (no shared libraries at runtime)
 QUANT_STATIC:BOOL=OFF
@@ -226,6 +248,9 @@ c10_LIBRARY:FILEPATH=/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-pac
 
 //Path to a library.
 kineto_LIBRARY:FILEPATH=kineto_LIBRARY-NOTFOUND
+
+//Path to a library.
+pkgcfg_lib_PC_CURL_curl:FILEPATH=/usr/lib/libcurl.so
 
 //Value Computed by CMake
 quant_ml_engine_BINARY_DIR:STATIC=/home/elpescad/quant-ml-engine/Quant-AI/build
@@ -383,12 +408,61 @@ CMAKE_UNAME:INTERNAL=/usr/bin/uname
 CMAKE_VERBOSE_MAKEFILE-ADVANCED:INTERNAL=1
 //Deprecated.  Use -W[no-]deprecated instead.
 CMAKE_WARN_DEPRECATED:INTERNAL=ON
+//ADVANCED property for variable: CURL_DIR
+CURL_DIR-ADVANCED:INTERNAL=1
+//ADVANCED property for variable: CURL_INCLUDE_DIR
+CURL_INCLUDE_DIR-ADVANCED:INTERNAL=1
+//ADVANCED property for variable: CURL_LIBRARY_DEBUG
+CURL_LIBRARY_DEBUG-ADVANCED:INTERNAL=1
+//ADVANCED property for variable: CURL_LIBRARY_RELEASE
+CURL_LIBRARY_RELEASE-ADVANCED:INTERNAL=1
 //Details about finding Python3
 FIND_PACKAGE_MESSAGE_DETAILS_Python3:INTERNAL=[/home/elpescad/quant-ml-engine/venv/bin/python3.14][found components: Interpreter ][v3.14.7()]
 //Details about finding Threads
 FIND_PACKAGE_MESSAGE_DETAILS_Threads:INTERNAL=[TRUE][v()]
 //Details about finding Torch
 FIND_PACKAGE_MESSAGE_DETAILS_Torch:INTERNAL=[/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/lib/libtorch.so][/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/include;/home/elpescad/quant-ml-engine/venv/lib/python3.14/site-packages/torch/include/torch/csrc/api/include][v()]
+PC_CURL_CFLAGS:INTERNAL=-I/usr/include
+PC_CURL_CFLAGS_I:INTERNAL=
+PC_CURL_CFLAGS_OTHER:INTERNAL=
+PC_CURL_FOUND:INTERNAL=1
+PC_CURL_INCLUDEDIR:INTERNAL=/usr/include
+PC_CURL_INCLUDE_DIRS:INTERNAL=/usr/include
+PC_CURL_LDFLAGS:INTERNAL=-L/usr/lib;-lcurl
+PC_CURL_LDFLAGS_OTHER:INTERNAL=
+PC_CURL_LIBDIR:INTERNAL=/usr/lib
+PC_CURL_LIBRARIES:INTERNAL=curl
+PC_CURL_LIBRARY_DIRS:INTERNAL=/usr/lib
+PC_CURL_LIBS:INTERNAL=
+PC_CURL_LIBS_L:INTERNAL=
+PC_CURL_LIBS_OTHER:INTERNAL=
+PC_CURL_LIBS_PATHS:INTERNAL=
+PC_CURL_MODULE_NAME:INTERNAL=libcurl
+PC_CURL_PREFIX:INTERNAL=/usr
+PC_CURL_STATIC_CFLAGS:INTERNAL=-I/usr/include;-DCURL_STATICLIB
+PC_CURL_STATIC_CFLAGS_I:INTERNAL=
+PC_CURL_STATIC_CFLAGS_OTHER:INTERNAL=-DCURL_STATICLIB
+PC_CURL_STATIC_INCLUDE_DIRS:INTERNAL=/usr/include
+PC_CURL_STATIC_LDFLAGS:INTERNAL=-L/usr/lib;-lcurl;-lssh2;-lssl;-lcrypto;-lidn2;-L/usr/lib;-lunistring;-lbrotlidec;-lbrotlicommon;-lzstd;-lgssapi_krb5;-lkrb5;-lk5crypto;-lcom_err;-lkrb5support;-lpsl;-lssh2;-L/usr/lib;-lssl;-L/usr/lib;-lcrypto;-L/usr/lib;-lz;-lz;-lnghttp2;-lngtcp2_crypto_ossl;-lngtcp2;-lssl;-lcrypto;-lz;-lbrotlienc;-lbrotlidec;-lbrotlicommon;-lm;-lzstd;-ldl;-pthread;-lnghttp3
+PC_CURL_STATIC_LDFLAGS_OTHER:INTERNAL=-pthread
+PC_CURL_STATIC_LIBDIR:INTERNAL=
+PC_CURL_STATIC_LIBRARIES:INTERNAL=curl;ssh2;ssl;crypto;idn2;unistring;brotlidec;brotlicommon;zstd;gssapi_krb5;krb5;k5crypto;com_err;krb5support;psl;ssh2;ssl;crypto;z;z;nghttp2;ngtcp2_crypto_ossl;ngtcp2;ssl;crypto;z;brotlienc;brotlidec;brotlicommon;m;zstd;dl;nghttp3
+PC_CURL_STATIC_LIBRARY_DIRS:INTERNAL=/usr/lib;/usr/lib;/usr/lib;/usr/lib;/usr/lib
+PC_CURL_STATIC_LIBS:INTERNAL=
+PC_CURL_STATIC_LIBS_L:INTERNAL=
+PC_CURL_STATIC_LIBS_OTHER:INTERNAL=
+PC_CURL_STATIC_LIBS_PATHS:INTERNAL=
+PC_CURL_VERSION:INTERNAL=8.22.0
+PC_CURL_libcurl_INCLUDEDIR:INTERNAL=
+PC_CURL_libcurl_LIBDIR:INTERNAL=
+PC_CURL_libcurl_PREFIX:INTERNAL=
+PC_CURL_libcurl_VERSION:INTERNAL=
+//ADVANCED property for variable: PKG_CONFIG_ARGN
+PKG_CONFIG_ARGN-ADVANCED:INTERNAL=1
+//ADVANCED property for variable: PKG_CONFIG_EXECUTABLE
+PKG_CONFIG_EXECUTABLE-ADVANCED:INTERNAL=1
+//Test QUANT_CURL_HAS_WEBSOCKETS
+QUANT_CURL_HAS_WEBSOCKETS:INTERNAL=1
 //Compiler reason failure
 _Python3_Compiler_REASON_FAILURE:INTERNAL=
 //Development reason failure
@@ -400,4 +474,9 @@ _Python3_INTERPRETER_PROPERTIES:INTERNAL=Python;3;14;7;64;32;<none>;cpython-314-
 _Python3_INTERPRETER_SIGNATURE:INTERNAL=e8f2ae0574dc9c43cc5cabb4e21a1695
 //NumPy reason failure
 _Python3_NumPy_REASON_FAILURE:INTERNAL=
+__pkg_config_arguments_PC_CURL:INTERNAL=QUIET;libcurl
+__pkg_config_checked_PC_CURL:INTERNAL=1
+//ADVANCED property for variable: pkgcfg_lib_PC_CURL_curl
+pkgcfg_lib_PC_CURL_curl-ADVANCED:INTERNAL=1
+prefix_result:INTERNAL=alt-svc;AsynchDNS;brotli;GSS-API;HSTS;HTTP2;HTTP3;HTTPS-proxy;IDN;IPv6;Kerberos;Largefile;libz;PSL;SPNEGO;SSL;threadsafe;UnixSockets;zstd
 
