@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <csignal>
+#include <ctime>
 #include <chrono>
 #include <climits>
 #include <cstring>
@@ -35,6 +37,9 @@
 #include "portfolio.hpp"
 #include "qubo_allocator.hpp"
 #include "ring_buffer.hpp"
+#ifdef QUANT_LIVE
+#include "live_feed.hpp"
+#endif
 
 namespace {
 
@@ -54,6 +59,15 @@ struct EngineOptions {
     double fee_bps = 0.2; // Per fill
     bool verify_qubo = false;
     bool verbose = false;
+    // Live mode (Alpaca)
+    bool live = false;
+    int live_check = 0; // seconds; > 0 = connectivity check only
+    std::string feed = "iex";
+    std::string symbols = "SPY,QQQ,AAPL,NVDA,MSFT,AMD";
+    int warmup_days = 30;
+    int bar_grace_s = 20;
+    int close_grace_s = 90;
+    std::string data_url, trading_url, stream_url;
 };
 
 void usage() {
@@ -70,6 +84,17 @@ void usage() {
                  "  --verify-qubo          check every SA solution against brute force\n"
                  "  --trades PATH          trade log (default trades.csv)\n"
                  "  --verbose              per-bar debug output\n";
+#ifdef QUANT_LIVE
+    std::cout << "\n"
+                 "Live paper trading on Alpaca market data (keys in APCA_API_KEY_ID / APCA_API_SECRET_KEY):\n"
+                 "  --live                 stream live bars and trade them; sleeps while the market is closed\n"
+                 "  --live-check [SECS]    test the clock, REST and stream connections, then exit (default 20 s)\n"
+                 "  --feed iex|sip         Alpaca data feed (default iex = free plan; sip needs a paid plan)\n"
+                 "  --symbols A,B,...      tickers (default SPY,QQQ,AAPL,NVDA,MSFT,AMD)\n"
+                 "  --warmup-days N        history fetched at start-up to warm the features (default 30)\n"
+                 "  --bar-grace S / --close-grace S   seconds to wait for late minute bars (default 20 / 90)\n"
+                 "  --data-url / --trading-url / --stream-url URL   override Alpaca endpoints (testing)\n";
+#endif
 }
 
 bool parse_args(int argc, char** argv, EngineOptions& o) {
@@ -92,6 +117,16 @@ bool parse_args(int argc, char** argv, EngineOptions& o) {
         else if (a == "--fee-bps") o.fee_bps = std::stod(next());
         else if (a == "--verify-qubo") o.verify_qubo = true;
         else if (a == "--verbose") o.verbose = true;
+        else if (a == "--live") o.live = true;
+        else if (a == "--live-check") o.live_check = (i + 1 < argc && argv[i + 1][0] != '-') ? std::stoi(next()) : 20;
+        else if (a == "--feed") o.feed = next();
+        else if (a == "--symbols") o.symbols = next();
+        else if (a == "--warmup-days") o.warmup_days = std::stoi(next());
+        else if (a == "--bar-grace") o.bar_grace_s = std::stoi(next());
+        else if (a == "--close-grace") o.close_grace_s = std::stoi(next());
+        else if (a == "--data-url") o.data_url = next();
+        else if (a == "--trading-url") o.trading_url = next();
+        else if (a == "--stream-url") o.stream_url = next();
         else if (a == "--help" || a == "-h") { usage(); return false; }
         else throw std::runtime_error("Unknown option " + a);
     }
@@ -109,6 +144,7 @@ LockFreeRingBuffer<MarketTick, 8192> event_queue;
 std::atomic<bool> stream_finished(false);
 std::atomic<bool> stop_requested(false);
 std::atomic<long> rows_skipped(0);
+WakeSignal consumer_wake;
 
 void pin_thread_to_core(std::thread& th, int core_id) {
 #ifdef __linux__
@@ -123,13 +159,81 @@ void pin_thread_to_core(std::thread& th, int core_id) {
 #endif
 }
 
+void push_tick(const MarketTick& tick) {
+    Backoff backoff;
+    while (!event_queue.push(tick)) [[unlikely]] {
+        if (stop_requested.load(std::memory_order_relaxed)) return;
+        backoff.wait();
+    }
+    consumer_wake.notify();
+}
+
+void finish_stream() {
+    stream_finished.store(true, std::memory_order_release);
+    consumer_wake.notify();
+}
+
+void request_stop(int) { stop_requested.store(true); }
+
+#ifdef QUANT_LIVE
+// End-of-bar marker: an empty ticker. Lets the engine act on a bar as soon as it is
+// complete instead of when the next bar's first tick arrives (5 minutes later live).
+void push_bar_end(int64_t bar_start) {
+    MarketTick marker;
+    marker.timestamp = bar_start;
+    marker.ticker[0] = '\0';
+    push_tick(marker);
+}
+
+std::vector<std::string> split_symbols(const std::string& s) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start <= s.size()) {
+        const size_t comma = s.find(',', start);
+        std::string sym = s.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (!sym.empty()) out.push_back(sym);
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return out;
+}
+
+LiveConfig make_live_config(const EngineOptions& o) {
+    LiveConfig c;
+    c.symbols = split_symbols(o.symbols);
+    c.feed = o.feed;
+    for (const char* k : {"APCA_API_KEY_ID", "ALPACA_API_KEY"}) if (!c.key.size() && std::getenv(k)) c.key = std::getenv(k);
+    for (const char* k : {"APCA_API_SECRET_KEY", "ALPACA_SECRET_KEY"}) if (!c.secret.size() && std::getenv(k)) c.secret = std::getenv(k);
+    if (!o.data_url.empty()) c.data_url = o.data_url;
+    if (!o.trading_url.empty()) c.trading_url = o.trading_url;
+    c.stream_url = o.stream_url;
+    c.warmup_days = o.warmup_days;
+    c.bar_grace_s = o.bar_grace_s;
+    c.close_grace_s = o.close_grace_s;
+    return c;
+}
+
+void live_producer(LiveConfig cfg) {
+    int tick_id = 0;
+    LiveFeed feed(std::move(cfg),
+                  [&tick_id](const MarketTick& t) {
+                      MarketTick copy = t;
+                      copy.id = tick_id++;
+                      push_tick(copy);
+                  },
+                  push_bar_end);
+    feed.run(stop_requested);
+    finish_stream();
+}
+#endif
+
 void file_stream_producer(const std::string& csv_file) {
     std::ifstream file;
     if (csv_file != "-") {
         file.open(csv_file);
         if (!file.is_open()) {
             std::cerr << "[-] Error opening market data file: " << csv_file << std::endl;
-            stream_finished.store(true, std::memory_order_release);
+            finish_stream();
             return;
         }
     }
@@ -141,12 +245,11 @@ void file_stream_producer(const std::string& csv_file) {
         std::cerr << "[-] Unexpected CSV header: " << line << "\n"
                   << "    Expected: " << kTickCsvHeader << "\n"
                   << "    Regenerate data with python/fetch_real_ticks.py or python/generate_ticks.py" << std::endl;
-        stream_finished.store(true, std::memory_order_release);
+        finish_stream();
         return;
     }
 
     int tick_id = 0;
-    Backoff backoff;
     while (std::getline(input, line) && !stop_requested.load(std::memory_order_relaxed)) {
         MarketTick tick;
         if (!parse_tick_row(line, tick)) {
@@ -154,13 +257,9 @@ void file_stream_producer(const std::string& csv_file) {
             continue;
         }
         tick.id = tick_id++;
-        backoff.reset();
-        while (!event_queue.push(tick)) [[unlikely]] {
-            if (stop_requested.load(std::memory_order_relaxed)) break;
-            backoff.wait();
-        }
+        push_tick(tick);
     }
-    stream_finished.store(true, std::memory_order_release);
+    finish_stream();
 }
 
 struct TickerState {
@@ -211,12 +310,16 @@ public:
                 if (!done_trading_) on_tick(tick);
             } else if (producer_done) {
                 break;
+            } else if (backoff.exhausted()) {
+                // Idle (market closed, or between live bars): block instead of polling
+                consumer_wake.wait([] { return !event_queue.empty() || stream_finished.load(std::memory_order_acquire); },
+                                   std::chrono::milliseconds(100));
             } else {
                 backoff.wait();
             }
         }
         if (!done_trading_) {
-            if (bar_ts_ != INT64_MIN) close_bar();
+            if (bar_ts_ != INT64_MIN && !bar_closed_) close_bar();
             portfolio_.liquidate_all(last_tick_id_);
         }
     }
@@ -320,8 +423,16 @@ private:
     }
 
     void on_tick(const MarketTick& tick) {
+        if (tick.ticker[0] == '\0') { // End-of-bar marker
+            if (tick.timestamp == bar_ts_ && !bar_closed_) {
+                close_bar();
+                bar_closed_ = true;
+            }
+            return;
+        }
         if (tick.timestamp != bar_ts_) {
-            if (bar_ts_ != INT64_MIN) close_bar();
+            if (bar_ts_ != INT64_MIN && !bar_closed_) close_bar();
+            bar_closed_ = false;
             if (tick.timestamp >= trade_end_) {
                 // Past the trading window: flatten and stop the producer early
                 portfolio_.liquidate_all(last_tick_id_);
@@ -419,6 +530,16 @@ private:
             auto t1 = std::chrono::steady_clock::now();
             if (!views.empty()) stats_.alloc_us.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
             portfolio_.record_equity();
+            if (opt_.live) {
+                int open = 0;
+                for (const auto& name : asset_names_) open += portfolio_.direction(name) != 0;
+                char when[32];
+                const std::time_t t = static_cast<std::time_t>(bar_ts_);
+                std::strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
+                std::cout << "[bar " << when << "] equity $" << std::fixed << std::setprecision(2)
+                          << portfolio_.get_total_equity() << " | " << open << " open position(s) | "
+                          << portfolio_.get_total_trades() << " round trips" << std::endl;
+            }
 
             if (opt_.verbose && bar_index_ % 50 == 0) {
                 std::cout << "[BAR " << bar_ts_ << "]";
@@ -451,6 +572,7 @@ private:
     int64_t trade_start_ = INT64_MIN;
     int64_t trade_end_ = INT64_MAX;
     bool done_trading_ = false;
+    bool bar_closed_ = false; // the current bar was already closed by an end-of-bar marker
     EngineStats stats_;
 };
 
@@ -469,14 +591,36 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Trading window: out-of-sample by default
+#ifndef QUANT_LIVE
+    if (opt.live || opt.live_check) {
+        std::cerr << "[-] This build has no live mode (needs libcurl with WebSocket support; see CMakeLists.txt)" << std::endl;
+        return 1;
+    }
+#else
+    if (opt.live || opt.live_check) {
+        LiveConfig lc = make_live_config(opt);
+        if (lc.key.empty() || lc.secret.empty()) {
+            std::cerr << "[-] Set APCA_API_KEY_ID and APCA_API_SECRET_KEY for live mode" << std::endl;
+            return 1;
+        }
+        if (opt.live_check) {
+            LiveFeed feed(lc, [](const MarketTick&) {}, [](int64_t) {});
+            return feed.check(opt.live_check, std::cout) ? 0 : 1;
+        }
+    }
+#endif
+
+    // Trading window: out-of-sample by default; live: bars from now on
     int64_t start = INT64_MIN, end = INT64_MAX;
-    if (opt.period == "test") start = cfg.test_start_ts;
+    if (opt.live) {
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        start = now - now % 300;
+    } else if (opt.period == "test") start = cfg.test_start_ts;
     else if (opt.period == "val") { start = cfg.val_start_ts; end = cfg.test_start_ts; }
     else if (opt.period != "all") { std::cerr << "[-] --period must be test, val or all" << std::endl; return 1; }
     if (opt.start_ts != INT64_MIN) start = opt.start_ts;
     if (opt.end_ts != INT64_MAX) end = opt.end_ts;
-    if (opt.period == "all") std::cout << "[!] Trading the full file: this includes the training period (in-sample)." << std::endl;
+    if (opt.period == "all" && !opt.live) std::cout << "[!] Trading the full file: this includes the training period (in-sample)." << std::endl;
 
     NativeModel module;
     try {
@@ -493,13 +637,19 @@ int main(int argc, char** argv) {
     std::cout << "[+] Model " << opt.model_path << " | quantum_lift=" << cfg.quantum_lift << " (" << cfg.n_qubits
               << " qubits, " << cfg.reps << " reps, bandwidth " << cfg.bandwidth << ") | input_dim=" << cfg.input_dim()
               << " | seq_len=" << cfg.seq_len << std::endl;
-    std::cout << "[+] Streaming " << opt.data_path << std::endl;
+    std::cout << "[+] " << (opt.live ? "Live " + opt.feed + " feed for " + opt.symbols : "Streaming " + opt.data_path) << std::endl;
 
     Engine engine(opt, cfg, module);
     engine.set_window(start, end);
 
     auto wall_start = std::chrono::steady_clock::now();
+    std::signal(SIGINT, request_stop);
+    std::signal(SIGTERM, request_stop);
+#ifdef QUANT_LIVE
+    std::thread producer = opt.live ? std::thread(live_producer, make_live_config(opt)) : std::thread(file_stream_producer, opt.data_path);
+#else
     std::thread producer(file_stream_producer, opt.data_path);
+#endif
     std::thread consumer([&engine] { engine.run(); });
     // Only the latency-critical consumer gets a core of its own (the last one)
     pin_thread_to_core(consumer, static_cast<int>(std::thread::hardware_concurrency()) - 1);

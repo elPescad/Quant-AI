@@ -255,7 +255,7 @@ private:
     void log_trade(int tick_id, const std::string& ticker, const char* action, double units, double price) {
         if (log_file_.is_open()) {
             log_file_ << tick_id << "," << ticker << "," << action << "," << price << "," << units << ","
-                      << cash_balance_ << "," << get_total_equity() << "\n";
+                      << cash_balance_ << "," << get_total_equity() << std::endl; // flushed: survives a crash or kill
         }
     }
 

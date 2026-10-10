@@ -19,6 +19,7 @@ ticks (CSV/stdin) ──► SPSC ring buffer ──► per-ticker features ─�
 | Feature pipeline | `src/feature_pipeline.hpp` | Shared by engine, model runner and tests. `python/quantum_features.py` is the training-side mirror (parity-tested). |
 | QUBO + annealing | `src/qubo.hpp` | QUBO model, simulated annealing (incremental fields, restarts, warm start, 1/2-flip polish), exact Gray-code brute force for verification. |
 | Allocator | `src/qubo_allocator.hpp` | Long/short/flat per ticker as binaries; mean-variance objective with EWMA covariance, turnover costs, and a slack-encoded max-positions constraint. |
+| Live feed | `src/live_feed.hpp`, `src/live_bars.hpp`, `src/alpaca_client.hpp` | Alpaca market clock, REST history and WebSocket stream on libcurl; builds 5-minute bars from 1-minute bars with the same feature code as training (bit-identical to `bar_schema.py`). |
 | Portfolio | `src/portfolio.hpp` | Fills at mid ± capped half spread, fees, gross-leverage cap, short proceeds excluded from buying power, stop-loss / take-profit / trailing exits. |
 
 ## Workflow
@@ -78,11 +79,41 @@ operation not supported`, Docker cannot create its virtual network interfaces on
 (on Arch: the kernel was upgraded and the running kernel's modules are gone until a reboot).
 Reboot, or build with `docker build --network=host -t quant-engine .`.
 
-The image is ~30 MB compressed (the Debian slim base; the two binaries are 4.4 MB). The build
-targets x86-64-v3 so an image built on one machine runs on any current x86 cloud VM.
+The image is ~40 MB compressed (Debian trixie slim, libcurl for the live feed and our two
+binaries). The build targets x86-64-v3 so an image built on one machine runs on any current
+x86 cloud VM.
 
 The model and its `_config.txt` must come from the same training run; the engine refuses
 to start without the config. Re-run `train_and_export.py` after changing the feature code.
+
+### Live paper trading (Alpaca)
+
+```bash
+export APCA_API_KEY_ID=... APCA_API_SECRET_KEY=...
+./quant_engine --live-check                   # clock, REST and stream connections (works when the market is closed)
+./quant_engine --live --model ../models/ensemble_model.weights --trades live_trades.csv
+# or in Docker, running until stopped:
+docker run -d --name quant-live --restart unless-stopped --cpus=2 --memory=1g --user "$(id -u):$(id -g)" \
+  -e APCA_API_KEY_ID -e APCA_API_SECRET_KEY -v "$PWD/models:/app/models:ro" -v "$PWD/out:/app/out" \
+  quant-engine --live --model /app/models/ensemble_model.weights --trades /app/out/live_trades.csv
+docker logs -f quant-live                     # one status line per 5-minute bar
+docker stop quant-live                        # flattens the paper positions and prints the report
+```
+
+How it runs: it asks Alpaca's market clock whether the market is open (holidays and early
+closes included) and sleeps until the next open when it is not. At start-up it fetches
+`--warmup-days` (30) of 5-minute history so the features are warm, then streams 1-minute
+bars and quotes over one WebSocket and builds each 5-minute bar, acting on it as soon as it
+is complete. Data is pushed by Alpaca, so nothing polls and no bar is processed twice; after
+a dropped connection it reconnects and fills any missed bars from REST. Idle it uses ~0.1% of
+a core and ~21 MB of memory. Trades are simulated by the engine (paper), not sent to Alpaca.
+
+Feeds: Alpaca's free plan streams real-time data from IEX only (`--feed iex`, default); IEX
+volume is a few percent of the whole market, so for live use train on IEX bars too
+(`python python/fetch_alpaca_ticks.py --feed iex --output data/alpaca_iex.csv`). A paid plan
+gives the consolidated SIP feed (`--feed sip`), matching the default training data. Live mode
+needs libcurl with WebSocket support (curl 8.11+, e.g. Arch or Debian trixie); CMake builds
+without it otherwise.
 
 ### `quant_engine` options
 

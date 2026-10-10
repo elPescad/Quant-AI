@@ -24,6 +24,8 @@
 #include "qubo_allocator.hpp"
 #include "ring_buffer.hpp"
 #include "native_model.hpp"
+#include "json_lite.hpp"
+#include "live_bars.hpp"
 
 static int g_failures = 0;
 static int g_checks = 0;
@@ -453,6 +455,88 @@ static void test_native_gru(const std::string& fixture_dir) {
     CHECK(threw, "non-model file is rejected");
 }
 
+// Live feed pieces that need no network: JSON, time, 1m -> 5m aggregation, features
+static void test_live_bars() {
+    std::cout << "[live] JSON, session clock, 5-minute aggregation, features\n";
+    {
+        Json m = Json::parse(R"([{"T":"b","S":"SPY","o":650.1,"h":650.42,"l":649.95,"c":650.31,"v":152340,"t":"2026-10-12T13:30:00Z","n":1200,"vw":650.2},
+                                 {"T":"q","S":"AMD","bp":87.66,"ap":87.68,"c":["R"],"t":"2026-10-12T13:30:01.5Z"},
+                                 {"T":"error","code":402,"msg":"auth \"failed\""}])");
+        CHECK(m.is_array() && m.items.size() == 3, "json: array of messages");
+        CHECK(m.items[0].text("S") == "SPY" && near(m.items[0].num("c"), 650.31, 1e-12) && near(m.items[0].num("v"), 152340, 0),
+              "json: bar fields");
+        CHECK(m.items[1]["c"].is_array() && m.items[1]["c"].items[0].str == "R", "json: nested array");
+        CHECK(m.items[2].text("msg") == "auth \"failed\"" && m.items[2].num("code") == 402, "json: escapes and ints");
+        Json nested = Json::parse(R"({"bars":{"SPY":[{"c":1.5}]},"next_page_token":null,"ok":true})");
+        CHECK(nested["bars"]["SPY"].items[0].num("c") == 1.5 && nested["next_page_token"].type == Json::Type::Null &&
+                  nested["ok"].boolean, "json: nested objects, null, bool");
+        bool threw = false;
+        try { Json::parse("[{\"a\":1,}"); } catch (const std::exception&) { threw = true; }
+        CHECK(threw, "json: malformed input rejected");
+    }
+    {
+        CHECK(live::parse_rfc3339("2026-10-12T13:30:00Z") == 1791811800, "rfc3339: Z");
+        CHECK(live::parse_rfc3339("2026-10-12T13:30:00.123456789Z") == 1791811800, "rfc3339: nanoseconds");
+        CHECK(live::parse_rfc3339("2026-10-12T09:30:00-04:00") == 1791811800, "rfc3339: offset");
+        CHECK(!live::parse_rfc3339("2026-10-12 13:30").has_value(), "rfc3339: rejects other formats");
+        CHECK(live::to_rfc3339(1791811800) == "2026-10-12T13:30:00Z", "rfc3339: formatting");
+        // Cases generated with Python zoneinfo (America/New_York)
+        const struct { int64_t t; bool in; int64_t off; } cases[] = {
+            {1791811800, true, -14400}, {1791811500, false, -14400}, {1791834900, true, -14400}, {1791835200, false, -14400},
+            {1797258600, true, -18000}, {1797258300, false, -18000}, {1797255000, false, -18000}, {1797281700, true, -18000},
+            {1797282000, false, -18000}, {1772807400, true, -18000}, {1772803800, false, -18000}, {1773063000, true, -14400},
+            {1773062700, false, -14400}, {1793367000, true, -14400}, {1793626200, false, -18000}, {1793629800, true, -18000},
+            {1791644400, false, -14400}, {1791730800, false, -14400}};
+        int ok = 0;
+        for (const auto& c : cases) ok += live::in_regular_session(c.t) == c.in && live::new_york_offset(c.t) == c.off;
+        CHECK(ok == static_cast<int>(std::size(cases)), "New York session and DST match zoneinfo on all cases");
+    }
+    {
+        const int64_t t0 = 1791811800; // Mon 09:30 EDT
+        live::FiveMinuteAggregator agg({"SPY", "QQQ"});
+        auto minute = [&](const char* s, int k, double o, double h, double l, double c, double v) {
+            return agg.add_minute({s, t0 + 60 * k, o, h, l, c, v});
+        };
+        int emitted = 0;
+        for (int k = 0; k < 5; ++k) {
+            emitted += static_cast<int>(minute("SPY", k, 100 + k, 101 + k, 99 + k, 100.5 + k, 10).size());
+            if (k != 2) emitted += static_cast<int>(minute("QQQ", k, 200, 201, 199, 200 + k, 5).size()); // QQQ misses 09:32
+        }
+        CHECK(emitted == 2, "bar emitted once every symbol delivered its last minute");
+        live::FiveMinuteAggregator agg2({"SPY"});
+        for (int k = 0; k < 5; ++k) agg2.add_minute({"SPY", t0 + 60 * k, 100.0 + k, 101.0 + k, 99.0 + k, 100.5 + k, 10});
+        live::FiveMinuteAggregator agg3({"SPY", "QQQ"});
+        for (int k = 0; k < 4; ++k) agg3.add_minute({"SPY", t0 + 60 * k, 100.0 + k, 101.0 + k, 99.0 + k, 100.5 + k, 10});
+        auto done = agg3.add_minute({"SPY", t0 + 300, 105, 106, 104, 105.5, 10}); // first minute of the next bar
+        CHECK(done.size() == 1 && done[0].start == t0 && near(done[0].open, 100, 0) && near(done[0].high, 104, 0) &&
+                  near(done[0].low, 99, 0) && near(done[0].close, 103.5, 0) && near(done[0].volume, 40, 0),
+              "OHLCV aggregated; a later minute completes the open bar");
+        CHECK(agg3.add_minute({"SPY", t0 + 120, 1, 1, 1, 1, 1}).empty() && agg3.emitted_through() == t0, "late minute dropped");
+        CHECK(agg3.on_clock(t0 + 600 + 5, 10).empty() && agg3.on_clock(t0 + 600 + 10, 10).size() == 1, "clock completes a stale bar");
+        agg3.skip_through(t0 + 900);
+        CHECK(agg3.add_minute({"SPY", t0 + 900, 1, 1, 1, 1, 1}).empty() && agg3.flush().empty(), "bars already delivered are skipped");
+    }
+    {
+        // Expected values from python/bar_schema.py bars_to_ticks on the same bars
+        const double bars[5][6] = {{1791034200, 650.10, 650.42, 649.95, 650.31, 152340}, {1791034500, 650.31, 650.55, 650.02, 650.12, 98211},
+                                   {1791034800, 650.12, 650.12, 649.40, 649.48, 210455}, {1791035100, 649.48, 649.90, 649.48, 649.48, 0},
+                                   {1791035400, 649.48, 652.80, 649.30, 652.75, 401200}};
+        const float expected[5][5] = {{650.309998f, 0.469999999f, 0.0f, 0.0f, 0.0f},
+                                      {650.119995f, 0.529999971f, -11.4948835f, -0.189999998f, 0.189999998f},
+                                      {649.47998f, 0.720000029f, -12.2570314f, -0.639999986f, 0.639999986f},
+                                      {649.47998f, 0.419999987f, 0.0f, 0.0f, 0.0f},
+                                      {652.75f, 2.0f, 12.9022179f, 3.26999998f, 3.26999998f}};
+        live::FeatureState fs;
+        int exact = 0;
+        for (int i = 0; i < 5; ++i) {
+            MarketTick t = fs.make_tick({"SPY", static_cast<int64_t>(bars[i][0]), bars[i][1], bars[i][2], bars[i][3], bars[i][4], bars[i][5]}, 0.01f);
+            exact += t.raw_price == expected[i][0] && t.raw_spread == expected[i][1] && t.raw_ofi == expected[i][2] &&
+                     t.raw_delta == expected[i][3] && t.raw_vol == expected[i][4] && t.target == -1 && t.quoted_spread == 0.01f;
+        }
+        CHECK(exact == 5, "live features are bit-identical to python/bar_schema.py");
+    }
+}
+
 int main(int argc, char** argv) {
     const std::string fixtures = argc > 1 ? argv[1] : "tests/fixtures";
     test_quantum_gates();
@@ -464,6 +548,7 @@ int main(int argc, char** argv) {
     test_native_gru(fixtures);
     test_portfolio();
     test_tick_parsing();
+    test_live_bars();
     std::cout << "\n" << (g_checks - g_failures) << "/" << g_checks << " checks passed\n";
     return g_failures == 0 ? 0 : 1;
 }
