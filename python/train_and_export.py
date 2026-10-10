@@ -224,8 +224,11 @@ def evaluate(model, data, idx):
             "dir_calls": float(np.mean(directional)), "dir_precision": dir_prec}
 
 
-def train(model, data, fit_idx, stop_idx, label):
+def train(make_model, data, fit_idx, stop_idx, label):
+    # Seed before constructing: weight initialisation draws from the global generator, whose
+    # starting state differs between processes
     torch.manual_seed(SEED)
+    model = make_model()
     rng = np.random.default_rng(SEED)
     criterion = nn.CrossEntropyLoss(weight=class_weights(data.targets[fit_idx]))
     opt = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
@@ -309,18 +312,18 @@ def train_and_export(val_ts=None, test_ts=None):
     print(f"[+] Samples: {len(fit)} fit | {len(inner)} inner | {len(val)} val | {len(test)} test")
 
     print("[+] Training (all choices on the inner split):")
-    gru_raw = train(QuantGRU(raw.dim), raw, fit, inner, "gru_raw")
+    gru_raw = train(lambda: QuantGRU(raw.dim), raw, fit, inner, "gru_raw")
 
     best_bw, best_loss, qset = None, np.inf, None
     for bw in BANDWIDTHS:
         cand = WindowSet(classical, FeatureConfig(**{**base_cfg.__dict__, "bandwidth": bw}))
-        lin = train(LastStepLinear(cand.dim), cand, fit, inner, f"linear_q(bw={bw})")
+        lin = train(lambda: LastStepLinear(cand.dim), cand, fit, inner, f"linear_q(bw={bw})")
         loss = evaluate(lin, cand, inner)["nll"]
         if loss < best_loss:
             best_bw, best_loss, qset = bw, loss, cand
     qcfg = FeatureConfig(**{**base_cfg.__dict__, "bandwidth": best_bw})
     print(f"[+] Selected quantum bandwidth {best_bw} (inner split)")
-    gru_q = train(QuantGRU(qset.dim), qset, fit, inner, "gru_quantum")
+    gru_q = train(lambda: QuantGRU(qset.dim), qset, fit, inner, "gru_quantum")
 
     cal_raw, t_raw = calibrate(gru_raw, raw, inner, N_CLASSICAL)
     cal_q, t_q = calibrate(gru_q, qset, inner, qset.dim)
