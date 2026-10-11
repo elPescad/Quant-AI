@@ -183,7 +183,9 @@ private:
         }
     }
 
-    // Complete 5-minute bars in [start, end), all symbols, oldest first
+    // Complete 5-minute bars in [start, end), all symbols, oldest first. Split and dividend
+    // adjusted like the training data (fetch_alpaca_ticks.py): on the current share basis, so
+    // the live stream's prices continue them even when a long warm-up spans a split.
     std::optional<std::vector<live::Bar>> history(int64_t start, int64_t end) {
         std::string syms;
         for (const auto& s : cfg_.symbols) syms += (syms.empty() ? "" : ",") + s;
@@ -191,7 +193,7 @@ private:
         std::string page;
         do {
             std::string url = cfg_.data_url + "/v2/stocks/bars?symbols=" + syms + "&timeframe=5Min&start=" + live::to_rfc3339(start) +
-                              "&end=" + live::to_rfc3339(end) + "&limit=10000&adjustment=raw&sort=asc&feed=" + cfg_.feed;
+                              "&end=" + live::to_rfc3339(end) + "&limit=10000&adjustment=all&sort=asc&feed=" + cfg_.feed;
             if (!page.empty()) url += "&page_token=" + page;
             const auto r = http_get(url, auth_headers(), 60);
             if (!r.error.empty() || r.status != 200) {

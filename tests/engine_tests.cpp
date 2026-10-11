@@ -25,6 +25,7 @@
 #include "quantum_sim.hpp"
 #include "qubo.hpp"
 #include "qubo_allocator.hpp"
+#include "regime.hpp"
 #include "ring_buffer.hpp"
 #include "native_model.hpp"
 #include "json_lite.hpp"
@@ -402,6 +403,49 @@ static void test_portfolio() {
     pm4.mark(2, "Q", 500.0f, 0.60f, 10.0f);   // 2% quoted spread: bad data
     pm4.rebalance(2, {{"Q", 1}});
     CHECK(pm4.direction("Q") == 0, "no entry when the quoted spread is implausibly wide");
+
+    // Risk layer: size multiplier for new positions, exits off for the slow baselines
+    PortfolioManager pm5(p);
+    pm5.mark(0, "V", 100.0f, 0.0f);
+    pm5.mark(0, "W", 100.0f, 0.0f);
+    const std::unordered_map<std::string, double> size{{"V", 0.5}};
+    pm5.rebalance(0, {{"V", 1}, {"W", 1}}, &size);
+    CHECK(near(pm5.units("V") * 100.0, 1250.0, 1.0) && near(pm5.units("W") * 100.0, 2500.0, 1.0), "size multiplier halves V only");
+    PortfolioParams p6 = p;
+    p6.risk_exits = false;
+    PortfolioManager pm6(p6);
+    pm6.mark(0, "X", 100.0f, 0.0f);
+    pm6.rebalance(0, {{"X", 1}});
+    CHECK(!pm6.mark(1, "X", 95.0f, 0.0f) && pm6.direction("X") == 1, "no stop-loss when risk exits are off");
+}
+
+// Daily regime: New York trading days, trend vs its N-day average, volatility and sizing
+static void test_regime() {
+    std::cout << "[regime] daily trend and volatility\n";
+    const int64_t day0 = 1772409600 + 14 * 3600 + 30 * 60; // Monday 2026-03-02 09:30 EST (14:30 UTC)
+    DailyRegime r(3, 2);
+    // Each day: a 09:30 bar and a 15:55 bar; the 15:55 price is the day's close
+    const double closes[] = {100.0, 101.0, 102.0, 99.0, 98.0};
+    int new_days = 0;
+    for (int d = 0; d < 5; ++d) {
+        const int64_t t = day0 + d * 86400;
+        new_days += r.on_tick(t, closes[d] - 0.5);
+        CHECK(!r.on_tick(t + 6 * 3600 + 25 * 60, closes[d]), "15:55 is the same New York day");
+        if (d == 0) CHECK(r.trend() == 0 && std::isnan(r.vol()), "unknown before enough completed days");
+        if (d == 3) CHECK(r.trend() == 1, "day 3: close 102 above the 3-day average 101 -> uptrend");
+    }
+    CHECK(new_days == 5, "one new day per date");
+    CHECK(r.on_tick(day0 + 5 * 86400, 97.0), "the 6th day starts");
+    CHECK(r.trend() == -1, "close 98 below the 3-day average 99.67 -> downtrend");
+    const double a = std::log(99.0 / 102.0), b = std::log(98.0 / 99.0);
+    const double vol = std::sqrt(((a - (a + b) / 2) * (a - (a + b) / 2) + (b - (a + b) / 2) * (b - (a + b) / 2)) * 252.0);
+    CHECK(near(r.vol(), vol, 1e-12), "volatility of the last 2 daily returns, annualised");
+    CHECK(near(r.size_for(vol / 2), 0.5, 1e-12) && r.size_for(10.0) == 1.0 && r.size_for(0.0) == 1.0,
+          "size = min(1, target / vol); no target = full size");
+    // A late-evening UTC timestamp still belongs to that New York day (20:00 EST = 01:00 UTC next day)
+    DailyRegime late(1, 2);
+    late.on_tick(day0, 10.0);
+    CHECK(!late.on_tick(day0 + 10 * 3600 + 30 * 60, 11.0), "01:00 UTC is still the previous New York day");
 }
 
 static void test_tick_parsing() {
@@ -641,6 +685,7 @@ int main(int argc, char** argv) {
     test_ring_buffer();
     test_native_gru(fixtures);
     test_portfolio();
+    test_regime();
     test_tick_parsing();
     test_live_bars();
 #ifdef QUANT_LIVE

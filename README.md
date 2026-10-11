@@ -34,15 +34,27 @@ python python/fetch_alpaca_ticks.py      # Alpaca (alpaca-py): needs APCA_API_KE
 python python/fetch_real_ticks.py        # Yahoo: last 60 days only
 python python/generate_ticks.py          # synthetic data with a known signal
 
+#    Years of history make every test below meaningful (125 days cannot tell a Sharpe of 1 from 0).
+#    The free plan serves SIP history (all but the last 15 minutes); the research inputs are price
+#    based, so they mean the same on SIP and on the IEX bars traded live:
+python python/fetch_alpaca_ticks.py --feed sip --days 1825 --quote-samples 2 --output data/alpaca_sip_5y.csv
+
+# Research (minutes, no GRU training), see "Research tools" below:
+python python/signal_lab.py --data data/alpaca_sip_5y.csv   # which horizon / inputs carry an edge after costs
+python python/regime_study.py                              # trend & volatility rules on 20-90 years of real data
+
 # Pick the trading configuration by walk-forward validation (3 folds before the test period):
-# candidates = {quantum, ensemble, q_veto, q_veto_short} x QUBO gamma {0 (= greedy), 25, 100}
-# (q_veto: quantum GRU trades, raw GRU can only veto; _short: only SELL calls need agreement).
+# candidates = {quantum, ensemble, q_veto_short} x QUBO gamma {0 (= greedy), 25, 100}
+#              x risk layer {none, trend, trend+vol}, plus the model-free trend / hold baselines
+# (q_veto_short: quantum GRU trades, only its SELL calls need the raw GRU's agreement).
 # Each fold retrains on data before it; score = mean fold Sharpe - 1 SE. Then one look at test,
 # long/short P&L split, and a model_runner pass (C++ accuracy, signal strength, latency).
-python python/compare_methods.py --data data/alpaca_ticks.csv   # add --online-lrs 0 0.001 0.003 to test online learning
+python python/compare_methods.py --data data/alpaca_ticks.csv   # --horizon 24 trains the GRUs for a 2-hour label
 # Then check the result is skill and not market drift or luck (seconds, no training):
 # vs buy & hold, beta-adjusted market-neutral P&L, and a random-direction permutation test
 python python/sanity_check.py --data data/alpaca_ticks.csv
+# And how risky it is (luck test, Sharpe interval, 1-12 month loss and drawdown odds):
+python python/monte_carlo.py runs/alpaca_ticks/fold*/bt_ensemble_g100_trend.equity.csv runs/alpaca_ticks/final/bt_ensemble_g100_trend.equity.csv
 
 # 2. Train. Splits by time: 60% train / 20% validation / 20% test. Early stopping, quantum
 #    bandwidth and probability calibration use the last 20% of the training window, so the
@@ -51,7 +63,7 @@ python python/sanity_check.py --data data/alpaca_ticks.csv
 #    Writes baseline_model (raw), quant_model (quantum), ensemble_model (average),
 #    quant_veto_model and quant_veto_short_model (raw vetoes quantum) as <name>.weights,
 #    each with <name>_config.txt
-python python/train_and_export.py
+python python/train_and_export.py       # --horizon N --hurdle X: label = return over N bars beyond +/-X
 
 # 3. Build (Release by default; needs only a C++20 compiler and CMake) and run
 cmake -S . -B build -G Ninja && cmake --build build
@@ -210,6 +222,65 @@ gives the consolidated SIP feed (`--feed sip`), matching the default training da
 needs libcurl with WebSocket support (curl 8.11+, e.g. Arch or Debian trixie); CMake builds
 without it otherwise.
 
+### Research tools and the risk layer
+
+Three questions decide whether the model can earn a profit that lasts, and each has a tool.
+
+**Is there an edge, and at which horizon?** `signal_lab.py` takes the same 5-minute CSV and, for
+horizons of 5 minutes to the close, measures how much each input says about the next move (daily
+rank correlation with a t-statistic) and how a simple walk-forward model on all of them trades
+after the measured spread and fees, next to always-long (the market's drift). It runs in a minute
+or two, so it is where to look for a better label horizon and better inputs before spending hours
+retraining the GRU; then train it on what holds up: `compare_methods.py --horizon N`. The inputs
+are price-based (multi-scale returns in units of recent volatility, overnight gap, time of day,
+volatility ratio, range, distance from the 20/50-day averages, the market's moves), so they mean the
+same on IEX and SIP bars and can be studied on years of SIP history. On the 125 days of IEX bars the
+GRU's 30-minute calls were no better than chance and its trades lost several times the spread, so
+the current inputs alone do not carry a tradable edge at that horizon.
+
+**Does "trade more in uptrends, less in downtrends" work?** `regime_study.py` tests it on real
+prices with costs and no look-ahead: the S&P 500 and NASDAQ daily 1999-2018 and the US stock market
+monthly 1927-2018 (bundled with `pip install arch`; `--alpaca SPY,QQQ,...` uses your tickers since
+2016). Against buy & hold:
+
+| | Sharpe | max drawdown | bad year (worst 5%) |
+|---|---|---|---|
+| S&P 500 1999-2018: buy & hold / trend 200d / trend + vol target | 0.28 / 0.32 / 0.35 | 57% / 26% / 22% | -22% / -13% / -11% |
+| NASDAQ 1999-2018 | 0.31 / 0.48 / 0.61 | 78% / 49% / 21% | -31% / -19% / -11% |
+| US market 1927-2018 (monthly, 10-month trend) | 0.42 / 0.54 / 0.58 | 84% / 43% / 30% | -22% / -12% / -10% |
+
+The rules mostly cut risk: drawdowns and bad years roughly halve, the Sharpe ratio gains 0.1-0.3
+(on NASDAQ and over 92 years far beyond what the same returns in shuffled order produce, p < 0.02;
+not on the S&P 500 1999-2018, p = 0.09-0.19). They lag in strong
+bull markets (S&P 2009-2018: 0.78 -> 0.54) and only work slowly: a 20-day trend is worse than none,
+150-300 days works. Trends are a months-scale effect, not a 5-minute one.
+
+The engine's risk layer applies it, decided on daily closes (`src/regime.hpp`), as options the
+walk-forward compares (`--risk none trend trend+vol`, `--trend-days 200`, `--vol-target 0.15`):
+
+* `--trend-days N`: the model may only trade with each ticker's N-day trend: long or flat while
+  the last close is above its N-day average, short or flat below. Positions against a new trend
+  are closed.
+* `--vol-target X`: new positions are sized by min(1, X / the ticker's annual volatility over
+  the last `--vol-days` 20 days), so turbulent stocks and turbulent weeks get smaller positions.
+* `--min-edge X`: the predicted move must beat X times the round-trip cost (and an open position
+  is kept until the prediction turns against it by more than X times the one-way cost), so it trades only when the
+  expected gain clearly pays for the trade.
+* `--signal trend`: no model; equal weight, long each ticker while above its trend average, else
+  flat, rebalanced once a day (with `--vol-target`, sized by volatility). `--signal hold` is always
+  long, the benchmark. A model has to beat the trend baseline to be worth its complexity.
+
+The trend needs N completed days before it can trade (live, the warm-up history is extended to
+cover it); compare_methods.py warns when the data before the first fold is shorter.
+
+**How safe is it?** `monte_carlo.py` takes equity curves (`quant_engine --equity`, written for every
+compare_methods.py backtest, or the paper account's `account.csv`): how often a strategy with no
+edge and the same volatility would show the measured Sharpe by luck, the Sharpe's 90% interval, the
+chance of a loss and the bad-case return and drawdown over the next 1-12 months (if the edge holds,
+and if it is really zero), and how many days of results it takes to know. Monte Carlo cannot
+create an edge or predict prices; it measures how much luck could explain and how rough the path
+can get, which is what sizes the account.
+
 ### `quant_engine` options
 
 | Flag | Default | |
@@ -222,6 +293,9 @@ without it otherwise.
 | `--verify-qubo` | off | Solve every bar's QUBO by brute force too and report how often SA found the optimum. |
 | `--model`, `--config`, `--data`, `--trades` | | Paths. Default model `../models/ensemble_model.weights`; `--data -` reads ticks from stdin (for a live feed). |
 | `--status-every S` | `300` live, `0` otherwise | Results summary every S seconds while the market is open (hourly heartbeat while closed). |
+| `--trend-days N`, `--vol-target X`, `--vol-days N`, `--min-edge X` | off, off, 20, 1 | Risk layer, see above. |
+| `--signal model\|trend\|hold` | `model` | `trend` / `hold`: model-free baselines (equal weight, daily). |
+| `--equity PATH` | | Equity after every bar, for `monte_carlo.py`. |
 
 ## Data format
 

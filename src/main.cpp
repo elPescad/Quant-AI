@@ -41,6 +41,7 @@
 #include "native_model.hpp"
 #include "portfolio.hpp"
 #include "qubo_allocator.hpp"
+#include "regime.hpp"
 #include "ring_buffer.hpp"
 #ifdef QUANT_LIVE
 #include "live_feed.hpp"
@@ -69,6 +70,13 @@ struct EngineOptions {
     bool verify_qubo = false;
     bool verbose = false;
     int status_every_s = -1; // periodic summary; -1 = 300 s live, off for backtests
+    std::string equity_path;  // per-bar equity curve (for python/monte_carlo.py)
+    // Risk layer (python/regime_study.py has the evidence on long real histories)
+    std::string signal = "model"; // model | trend (long while above the trend average) | hold (always long)
+    int trend_days = 0;       // > 0: trade only with each ticker's N-day trend
+    double vol_target = 0.0;  // > 0: size positions by min(1, target / annual volatility)
+    int vol_days = 20;
+    double min_edge = 1.0;    // expected move must beat this multiple of the round-trip cost
     // Live mode (Alpaca)
     bool live = false;
     bool paper_orders = false; // mirror positions into the Alpaca paper account
@@ -96,6 +104,14 @@ void usage() {
                  "  --online-anchor X      pull of the learned head towards the trained one (default 0.1)\n"
                  "  --online-state PATH    save/restore what online learning learned (only for the same model)\n"
                  "  --verify-qubo          check every SA solution against brute force\n"
+                 "Risk layer (decided on daily closes; evidence: python/regime_study.py):\n"
+                 "  --trend-days N         trade only in the direction of each ticker's N-day trend (default 0 = off)\n"
+                 "  --vol-target X         size positions by min(1, X / annual volatility), e.g. 0.15 (default 0 = off)\n"
+                 "  --vol-days N           days of daily returns for that volatility (default 20)\n"
+                 "  --min-edge X           expected move must beat X times the round-trip cost (default 1)\n"
+                 "  --signal model|trend|hold   trend: no model, long each ticker while above its trend average,\n"
+                 "                         else flat; hold: always long (benchmark). Equal weight, rebalanced daily\n"
+                 "  --equity PATH          write the equity after every bar (for python/monte_carlo.py)\n"
                  "  --trades PATH          trade log (default trades.csv; appended to in live mode)\n"
                  "  --status-every SECS    print a results summary this often (default 300 live, 0 = off)\n"
                  "  --verbose              per-bar debug output\n";
@@ -138,6 +154,12 @@ bool parse_args(int argc, char** argv, EngineOptions& o) {
         else if (a == "--verify-qubo") o.verify_qubo = true;
         else if (a == "--verbose") o.verbose = true;
         else if (a == "--status-every") o.status_every_s = std::stoi(next());
+        else if (a == "--equity") o.equity_path = next();
+        else if (a == "--signal") o.signal = next();
+        else if (a == "--trend-days") o.trend_days = std::stoi(next());
+        else if (a == "--vol-target") o.vol_target = std::stod(next());
+        else if (a == "--vol-days") o.vol_days = std::stoi(next());
+        else if (a == "--min-edge") o.min_edge = std::stod(next());
         else if (a == "--live") o.live = true;
         else if (a == "--paper-orders") o.paper_orders = true;
         else if (a == "--live-check") o.live_check = (i + 1 < argc && argv[i + 1][0] != '-') ? std::stoi(next()) : 20;
@@ -160,6 +182,12 @@ bool parse_args(int argc, char** argv, EngineOptions& o) {
     }
     if (o.allocator != "qubo" && o.allocator != "greedy") throw std::runtime_error("--allocator must be qubo or greedy");
     if (o.status_every_s < 0) o.status_every_s = o.live ? 300 : 0;
+    if (o.signal != "model" && o.signal != "trend" && o.signal != "hold") throw std::runtime_error("--signal must be model, trend or hold");
+    if (o.signal == "trend" && o.trend_days <= 0) throw std::runtime_error("--signal trend needs --trend-days N");
+    if (o.trend_days < 0 || o.vol_target < 0 || o.vol_days < 2 || o.min_edge <= 0) throw std::runtime_error("bad risk layer value");
+    // Live: the warm-up history must cover the slowest daily rule (trading days -> calendar days)
+    const int need_days = std::max(o.trend_days, o.vol_target > 0 ? o.vol_days + 1 : 0);
+    if (o.live && need_days > 0) o.warmup_days = std::max(o.warmup_days, (need_days * 7 + 4) / 5 + 10);
     return true;
 }
 
@@ -324,12 +352,14 @@ void file_stream_producer(const std::string& csv_file) {
 }
 
 struct TickerState {
-    explicit TickerState(const FeatureConfig& cfg, int asset_idx)
-        : pipeline(cfg), moves(cfg.label_horizon), asset(asset_idx) {}
+    TickerState(const FeatureConfig& cfg, int asset_idx, int trend_days, int vol_days)
+        : pipeline(cfg), moves(cfg.label_horizon), asset(asset_idx), regime(trend_days, vol_days) {}
 
     TickerFeaturePipeline pipeline;
     HorizonMoveTracker moves;
     int asset;
+    DailyRegime regime;
+    int64_t rebalanced_day = INT64_MIN; // trend / hold baselines: last day this ticker was rebalanced
     double edge = 0.0;      // p_buy - p_sell from the latest model call
     long signal_bar = -1;   // Bar index of that call
     long cooldown_until = -1;
@@ -357,6 +387,10 @@ struct EngineStats {
     long ticks = 0;
     double cost_sum = 0.0; // One-way costs the allocator was given
     long cost_n = 0;
+    long decisions = 0;     // signals that reached the risk layer
+    long against_trend = 0; // ... set to flat because they opposed the trend (or it was unknown)
+    double size_sum = 0.0;  // vol-target size multipliers of those decisions
+
     long quoted_ticks = 0; // Ticks carrying a measured bid-ask spread
 };
 
@@ -369,7 +403,12 @@ public:
           allocator_(make_alloc_params(opt, cfg), risk_),
           window_(static_cast<size_t>(cfg.seq_len) * cfg.input_dim(), 0.0f),
           run_start_(wall_now()),
-          next_status_(std::chrono::steady_clock::now() + std::chrono::seconds(std::max(opt.status_every_s, 1))) {}
+          next_status_(std::chrono::steady_clock::now() + std::chrono::seconds(std::max(opt.status_every_s, 1))) {
+        if (!opt.equity_path.empty()) {
+            equity_log_.open(opt.equity_path);
+            equity_log_ << "bar_ts,equity\n";
+        }
+    }
 
     void run() {
         MarketTick tick;
@@ -467,6 +506,12 @@ public:
                   << "Avg Gross Exposure:    " << portfolio_.get_avg_gross_exposure() << " % of equity\n"
                   << "Max Drawdown:          " << portfolio_.get_max_drawdown() << " %\n"
                   << "Sharpe Ratio (ann.):   " << portfolio_.calculate_sharpe_ratio() << "\n"
+                  << "Risk Layer:            " << risk_text();
+        if (stats_.decisions && (opt_.trend_days > 0 || opt_.vol_target > 0.0))
+            std::cout << " | " << (opt_.signal == "model" ? "against the trend: " : "flat: ")
+                      << 100.0 * stats_.against_trend / stats_.decisions << "% of " << stats_.decisions << " decisions"
+                      << (opt_.vol_target > 0.0 ? ", avg size x" + num(stats_.size_sum / stats_.decisions, 2) : std::string());
+        std::cout << "\n"
                   << "==================================================\n";
         if (rows_skipped.load() > 0) std::cout << "[!] Skipped " << rows_skipped.load() << " malformed CSV rows\n";
     }
@@ -485,6 +530,7 @@ private:
         PortfolioParams p;
         p.trade_log = o.trades_path;
         p.append_log = o.live;
+        p.risk_exits = o.signal == "model"; // the baselines hold for days; their exit is the trend
         p.fee_rate = o.fee_bps * 1e-4;
         p.position_weight = 1.0 / std::max(1, o.max_positions);
         return p;
@@ -507,7 +553,7 @@ private:
         if (it != states_.end()) return *it->second;
         int idx = risk_.add_asset();
         asset_names_.push_back(sym);
-        auto [ins, ok] = states_.emplace(sym, std::make_unique<TickerState>(cfg_, idx));
+        auto [ins, ok] = states_.emplace(sym, std::make_unique<TickerState>(cfg_, idx, opt_.trend_days, opt_.vol_days));
         return *ins->second;
     }
 
@@ -545,6 +591,7 @@ private:
         auto t1 = std::chrono::steady_clock::now();
         stats_.feature_us.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
 
+        st.regime.on_tick(tick.timestamp, tick.raw_price);
         st.last_price = tick.raw_price;
         st.seen_this_bar = true;
 
@@ -708,7 +755,19 @@ private:
               << " bars (within 2x the +/- of 0 = indistinguishable from luck)\n";
         else
             o << "n/a until two bars have been traded\n";
-        o << "  Strategy      " << allocator_text() << ", max " << opt_.max_positions << " positions, "
+        if (opt_.trend_days > 0 || opt_.vol_target > 0.0) {
+            o << "  Regime       ";
+            for (const auto& name : asset_names_) {
+                const DailyRegime& r = states_.at(name)->regime;
+                o << " " << name << " " << (opt_.trend_days <= 0 ? "" : r.trend() > 0 ? "up" : r.trend() < 0 ? "down" : "?");
+                if (opt_.vol_target > 0.0) o << (opt_.trend_days > 0 ? " " : "") << "x" << num(r.size_for(opt_.vol_target), 2);
+                o << (&name == &asset_names_.back() ? "" : ",");
+            }
+            o << " (daily closes: " << (opt_.trend_days > 0 ? std::to_string(opt_.trend_days) + "-day trend" : std::string())
+              << (opt_.trend_days > 0 && opt_.vol_target > 0.0 ? ", " : "")
+              << (opt_.vol_target > 0.0 ? "size for " + num(100.0 * opt_.vol_target, 0) + "% volatility" : std::string()) << ")\n";
+        }
+        o << "  Strategy      " << risk_text() << " | " << allocator_text() << ", max " << opt_.max_positions << " positions, "
           << opt_.model_path.substr(opt_.model_path.find_last_of('/') + 1) << "\n"
           << "  Model         buy/sell calls right ";
         if (dir_calls_) o << num(100.0 * dir_right_ / dir_calls_, 1) << "% of " << dir_calls_ << " (vs the price " << cfg_.label_horizon * 5 << " min later)";
@@ -782,6 +841,54 @@ public:
 
 private:
 
+    // Trend filter: a signal against the ticker's trend (or while the trend is unknown) becomes
+    // "flat"; vol target: the new position's size, 0 while the volatility is unknown
+    void apply_risk_layer(const TickerState& st, const std::string& name, double& expected_return,
+                          std::unordered_map<std::string, double>& sizes) {
+        stats_.decisions++;
+        if (opt_.trend_days > 0 && expected_return * st.regime.trend() <= 0.0 && expected_return != 0.0) {
+            expected_return = 0.0;
+            stats_.against_trend++;
+        }
+        if (opt_.vol_target > 0.0) {
+            const double size = st.regime.size_for(opt_.vol_target);
+            sizes[name] = size;
+            stats_.size_sum += size;
+            if (size <= 0.0) expected_return = 0.0;
+        }
+    }
+
+    // Model-free baselines, equal weight over all tickers, once per day on each ticker's first
+    // bar: trend = long while the last close is above its N-day average, else flat; hold = long
+    void rebalance_baseline(int64_t day) {
+        portfolio_.set_position_weight(1.0 / std::max<size_t>(1, asset_names_.size()));
+        std::vector<std::pair<std::string, int>> targets;
+        std::unordered_map<std::string, double> sizes;
+        for (const auto& name : asset_names_) {
+            TickerState& st = *states_[name];
+            if (!st.seen_this_bar || st.rebalanced_day == day) continue;
+            st.rebalanced_day = day;
+            const int dir = opt_.signal == "hold" ? 1 : (st.regime.trend() > 0 ? 1 : 0);
+            stats_.decisions++;
+            stats_.against_trend += dir == 0;
+            stats_.cost_sum += portfolio_.one_way_cost(name);
+            stats_.cost_n++;
+            targets.push_back({name, dir});
+            const double size = opt_.vol_target > 0.0 ? st.regime.size_for(opt_.vol_target) : 1.0;
+            sizes[name] = size;
+            stats_.size_sum += size;
+        }
+        if (!targets.empty()) portfolio_.rebalance(last_tick_id_, targets, &sizes);
+    }
+
+    std::string risk_text() const {
+        std::string s = opt_.signal == "model" ? "model signal" : (opt_.signal == "trend" ? "trend baseline (no model)" : "hold baseline (always long)");
+        if (opt_.trend_days > 0) s += ", trend " + std::to_string(opt_.trend_days) + "d";
+        if (opt_.vol_target > 0.0) s += ", vol target " + num(100.0 * opt_.vol_target, 0) + "%";
+        if (opt_.min_edge != 1.0) s += ", min edge x" + num(opt_.min_edge, 1);
+        return s;
+    }
+
     void close_bar() {
         // 1. Risk model: 1-bar returns of every ticker that printed in this bar
         const int n = risk_.size();
@@ -802,46 +909,53 @@ private:
         if (trading_now()) {
             stats_.trading_bars++;
             auto t0 = std::chrono::steady_clock::now();
-
-            std::vector<AssetView> views;
-            std::vector<std::string> names;
-            int held_outside = 0;
-            for (const auto& name : asset_names_) {
-                TickerState& st = *states_[name];
-                const int cur = portfolio_.direction(name);
-                const bool eligible = st.signal_bar == bar_index_ && st.moves.ready() && risk_.warm() &&
-                                      bar_index_ >= st.cooldown_until;
-                if (!eligible) {
-                    held_outside += cur != 0;
-                    continue;
-                }
-                AssetView v;
-                v.asset = st.asset;
-                v.expected_return = st.edge * st.moves.typical_move();
-                v.cost = portfolio_.one_way_cost(name);
-                stats_.cost_sum += v.cost;
-                stats_.cost_n++;
-                v.current = cur;
-                views.push_back(v);
-                names.push_back(name);
-            }
-
-            const int capacity = opt_.max_positions - held_outside;
-            std::vector<int> dirs = (opt_.allocator == "qubo") ? allocator_.allocate(views, capacity)
-                                                               : QuboAllocator::greedy(views, capacity);
-            std::vector<std::pair<std::string, int>> targets;
-            for (size_t i = 0; i < names.size(); ++i) targets.push_back({names[i], dirs[i]});
             const int64_t day = ny_day(bar_ts_);
             if (day != day_) { // first bar of a New York day: today's P&L counts from here
                 day_ = day;
                 day_start_equity_ = last_equity_;
             }
-            portfolio_.rebalance(last_tick_id_, targets);
+
+            std::vector<AssetView> views;
+            std::vector<std::string> names;
+            std::vector<int> dirs;
+            if (opt_.signal == "model") {
+                std::unordered_map<std::string, double> sizes;
+                int held_outside = 0;
+                for (const auto& name : asset_names_) {
+                    TickerState& st = *states_[name];
+                    const int cur = portfolio_.direction(name);
+                    const bool eligible = st.signal_bar == bar_index_ && st.moves.ready() && risk_.warm() &&
+                                          bar_index_ >= st.cooldown_until;
+                    if (!eligible) {
+                        held_outside += cur != 0;
+                        continue;
+                    }
+                    AssetView v;
+                    v.asset = st.asset;
+                    v.expected_return = st.edge * st.moves.typical_move();
+                    apply_risk_layer(st, name, v.expected_return, sizes);
+                    v.cost = portfolio_.one_way_cost(name) * opt_.min_edge;
+                    stats_.cost_sum += v.cost / opt_.min_edge;
+                    stats_.cost_n++;
+                    v.current = cur;
+                    views.push_back(v);
+                    names.push_back(name);
+                }
+
+                const int capacity = opt_.max_positions - held_outside;
+                dirs = (opt_.allocator == "qubo") ? allocator_.allocate(views, capacity) : QuboAllocator::greedy(views, capacity);
+                std::vector<std::pair<std::string, int>> targets;
+                for (size_t i = 0; i < names.size(); ++i) targets.push_back({names[i], dirs[i]});
+                portfolio_.rebalance(last_tick_id_, targets, opt_.vol_target > 0.0 ? &sizes : nullptr);
+            } else {
+                rebalance_baseline(day);
+            }
 
             auto t1 = std::chrono::steady_clock::now();
             if (!views.empty()) stats_.alloc_us.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
             portfolio_.record_equity();
             last_equity_ = portfolio_.get_total_equity();
+            if (equity_log_.is_open()) equity_log_ << bar_ts_ << "," << last_equity_ << "\n";
             send_targets();
             if (opt_.live && online() && ++bars_since_save_ >= 12) { // hourly
                 save_online_state();
@@ -893,6 +1007,7 @@ private:
     long online_updates_ = 0;
     int bars_since_save_ = 0;
     long dir_calls_ = 0, dir_right_ = 0; // settled buy/sell calls, and how many the price agreed with
+    std::ofstream equity_log_;
     // Status summary
     static constexpr double kCapital = 10000.0; // PortfolioParams::starting_cash
     static constexpr double kBarsPerYear = 252.0 * 78.0;

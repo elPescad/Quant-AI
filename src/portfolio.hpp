@@ -39,6 +39,7 @@ struct PortfolioParams {
     double bars_per_year = 252.0 * 78.0;     // 5-minute bars
     std::string trade_log = "trades.csv";
     bool append_log = false; // live: keep earlier runs' trades (restarts must not wipe the log)
+    bool risk_exits = true;  // stop-loss / take-profit / trailing stop (sized for the model's 30-minute trades)
 };
 
 class PortfolioManager {
@@ -68,6 +69,7 @@ public:
         spread_ok_[ticker] = spread_rel <= p_.max_raw_spread_pct;
         pos.half_spread_pct = 0.5 * (quoted ? spread_rel : std::min(spread_rel, p_.max_spread_cost_pct));
 
+        if (!p_.risk_exits) return false;
         if (pos.direction() > 0) {
             const double fill = bid(pos);
             pos.highest_price_since_entry = std::max(pos.highest_price_since_entry, fill);
@@ -90,7 +92,9 @@ public:
 
     // Moves every listed ticker to its target direction (-1, 0, +1).
     // All closes run before any opens so freed cash can fund the new positions.
-    void rebalance(int tick_id, const std::vector<std::pair<std::string, int>>& targets) {
+    // size: optional per-ticker multiplier (0..1) of the normal position size for new positions
+    void rebalance(int tick_id, const std::vector<std::pair<std::string, int>>& targets,
+                   const std::unordered_map<std::string, double>* size = nullptr) {
         for (const auto& [ticker, dir] : targets) {
             auto it = positions_.find(ticker);
             if (it == positions_.end()) continue;
@@ -103,7 +107,12 @@ public:
             auto it = positions_.find(ticker);
             if (it == positions_.end() || dir == 0 || it->second.direction() == dir) continue;
             if (!spread_ok_[ticker]) continue;
-            open(tick_id, ticker, it->second, dir);
+            double mult = 1.0;
+            if (size) {
+                auto m = size->find(ticker);
+                if (m != size->end()) mult = m->second;
+            }
+            open(tick_id, ticker, it->second, dir, mult);
         }
     }
 
@@ -114,6 +123,9 @@ public:
             else if (pos.direction() < 0) close(tick_id, ticker, pos, "END_OF_DATA_COVER");
         }
     }
+
+    // Fraction of equity per new position (the trend / hold baselines use 1 / number of tickers)
+    void set_position_weight(double w) { p_.position_weight = w; }
 
     // Start (unix seconds) of the bar being processed, written to the trade log
     void set_bar_time(int64_t ts) { bar_ts_ = ts; }
@@ -215,10 +227,10 @@ private:
     }
 
     // Dollars a new position may use without breaching the size, leverage or cash limits
-    double available_trade_usd() const {
+    double available_trade_usd(double mult = 1.0) const {
         const double equity = get_total_equity();
         if (equity <= 0.0) return 0.0;
-        const double target = equity * p_.position_weight;
+        const double target = equity * p_.position_weight * std::clamp(mult, 0.0, 1.0);
         // Fees reduce equity, so solve gross + usd <= lev * (equity - usd * fee) for usd
         const double exposure_room = (equity * p_.max_gross_leverage - get_gross_exposure()) /
                                      (1.0 + p_.max_gross_leverage * p_.fee_rate);
@@ -227,8 +239,8 @@ private:
         return std::max(0.0, std::min({target, exposure_room, free_cash}));
     }
 
-    void open(int tick_id, const std::string& ticker, Position& pos, int dir) {
-        const double usd = available_trade_usd();
+    void open(int tick_id, const std::string& ticker, Position& pos, int dir, double mult = 1.0) {
+        const double usd = available_trade_usd(mult);
         if (usd < 10.0) return;
         const double fee = usd * p_.fee_rate;
         fees_paid_ += fee;

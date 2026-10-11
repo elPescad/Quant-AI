@@ -163,13 +163,27 @@ def purge_before(timeline, boundary, horizon):
     return int(timeline[max(0, idx - horizon)]) if idx < len(timeline) else int(timeline[max(0, len(timeline) - horizon)])
 
 
+def relabel(price, horizon, hurdle):
+    """bar_schema.py's labelling rule for another horizon / hurdle: 2 buy, 0 sell, 1 hold, -1 unknown."""
+    price = np.asarray(price, dtype=np.float64)
+    fwd = np.full(len(price), np.nan)
+    fwd[:-horizon] = price[horizon:] / price[:-horizon] - 1.0
+    y = np.ones(len(price), dtype=np.int64)
+    y[fwd > hurdle] = 2
+    y[fwd < -hurdle] = 0
+    y[np.isnan(fwd)] = -1
+    return y
+
+
 def per_ticker_classical(df, cfg):
     """Classical features per ticker, computed in stream order exactly like the engine."""
     out = {}
+    custom = (cfg.label_horizon, cfg.label_hurdle) != (LABEL_HORIZON, FEE_HURDLE_PCT)
     for (sym,), g in df.group_by(["ticker"], maintain_order=True):
         c = classical_features(g["raw_spread"].to_numpy(), g["raw_ofi"].to_numpy(),
                                g["raw_delta"].to_numpy(), g["raw_vol"].to_numpy(), cfg)
-        out[sym] = (c, g["target"].to_numpy(), g["timestamp"].to_numpy())
+        y = relabel(g["raw_price"].to_numpy(), cfg.label_horizon, cfg.label_hurdle) if custom else g["target"].to_numpy()
+        out[sym] = (c, y, g["timestamp"].to_numpy())
     return out
 
 
@@ -305,7 +319,7 @@ def train_seeds(make_model, data, fit, inner, label, n_inputs, seeds):
     return members
 
 
-def train_and_export(val_ts=None, test_ts=None, seeds=SEEDS):
+def train_and_export(val_ts=None, test_ts=None, seeds=SEEDS, horizon=LABEL_HORIZON, hurdle=FEE_HURDLE_PCT):
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     print(f"[+] Loading {CSV_FILE}")
     df = load_ticks()
@@ -316,8 +330,8 @@ def train_and_export(val_ts=None, test_ts=None, seeds=SEEDS):
     if not val_ts <= test_ts:
         raise SystemExit("[-] --val-start must not be after --test-start")
 
-    base_cfg = FeatureConfig(val_start_ts=val_ts, test_start_ts=test_ts, label_horizon=LABEL_HORIZON, label_hurdle=FEE_HURDLE_PCT)
-    horizon = base_cfg.label_horizon
+    base_cfg = FeatureConfig(val_start_ts=val_ts, test_start_ts=test_ts, label_horizon=horizon, label_hurdle=hurdle)
+    print(f"[+] Labels: return over the next {horizon} bars ({5 * horizon} min) beyond +/-{1e4 * hurdle:g} bp")
     train_ts = timeline[timeline < val_ts]
     inner_ts = int(train_ts[int(len(train_ts) * (1.0 - INNER_FRAC))])
     print(f"[+] {len(df):,} ticks, {df['ticker'].n_unique()} tickers | inner from {inner_ts}, val from {val_ts}, test from {test_ts}")
@@ -396,6 +410,12 @@ if __name__ == "__main__":
     parser.add_argument("--val-start", type=int, help="first val timestamp; training uses data before it (default: 60%%)")
     parser.add_argument("--test-start", type=int, help="first test timestamp (default: 80%%)")
     parser.add_argument("--seeds", type=int, default=SEEDS, help=f"random starts per GRU, averaged (default {SEEDS})")
+    parser.add_argument("--horizon", type=int, default=LABEL_HORIZON,
+                        help=f"label: return over this many bars ahead (default {LABEL_HORIZON} = 30 min; signal_lab.py compares horizons)")
+    parser.add_argument("--hurdle", type=float, default=FEE_HURDLE_PCT,
+                        help=f"label: |return| above this is BUY/SELL, else HOLD (default {FEE_HURDLE_PCT})")
     args = parser.parse_args()
+    if args.horizon < 1:
+        parser.error("--horizon must be at least 1 bar")
     CSV_FILE, MODEL_DIR = args.data, args.model_dir
-    train_and_export(args.val_start, args.test_start, args.seeds)
+    train_and_export(args.val_start, args.test_start, args.seeds, args.horizon, args.hurdle)
