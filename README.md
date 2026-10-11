@@ -156,7 +156,8 @@ it keeps adapting to recent days without drifting far on noise. The GRUs themsel
 full retraining stays offline. `--online-state` saves what was learned (hourly and at exit) and
 restores it on restart, only for the same model file. Choose the rate by walk-forward
 (`compare_methods.py --online-lrs 0 0.001 0.003`): on synthetic data 0.001 helped and 0.01+
-hurt, because large steps chase noise.
+hurt, because large steps chase noise. On 125 days of IEX bars both 0.001 and 0.003 made every
+configuration worse (more trades, lower walk-forward Sharpe), so it stays off there.
 
 ### Deploying to a GCP VM
 
@@ -164,7 +165,9 @@ Train on your own machine, then upload: the 1 GB VM runs the C++ engine (~21 MB)
 but not PyTorch training, and training would compete with the live engine for the CPU. Nothing
 is trained on the VM; online learning (if enabled) adjusts the model's output layer there.
 
-Once, on the VM (Debian 12 image; `gcloud compute ssh VM --zone ZONE`):
+Free tier: one e2-micro in us-west1, us-central1 or us-east1, with a *standard* persistent boot
+disk (up to 30 GB; the default "balanced" disk is billed); check the monthly estimate on the
+create page. Once, on the VM (Debian 12 image; `gcloud compute ssh VM --zone ZONE`):
 
 ```bash
 sudo apt-get update && sudo apt-get install -y docker.io
@@ -177,7 +180,7 @@ Then, from the repository root on your machine (needs docker and the
 [gcloud CLI](https://cloud.google.com/sdk/docs/install), logged in to your project):
 
 ```bash
-deploy/deploy_gcp.sh VM ZONE ensemble_model -- --online-lr 0.001   # model and flags compare_methods.py selected
+deploy/deploy_gcp.sh VM ZONE ensemble_model -- --allocator qubo --risk-aversion 100   # model and flags from compare_methods.py
 gcloud compute ssh VM --zone ZONE --command 'docker logs -f --tail 60 quant-live'
 gcloud compute scp VM:~/quant/out/account.csv out/ --zone ZONE && python python/paper_report.py out/account.csv
 ```

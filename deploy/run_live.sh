@@ -4,7 +4,7 @@
 # crash or a reboot. deploy/deploy_gcp.sh copies this file to ~/quant/ on the VM and runs it.
 #
 #   ~/quant/run_live.sh [MODEL] [extra engine flags]
-#   ~/quant/run_live.sh ensemble_model --online-lr 0.001
+#   ~/quant/run_live.sh ensemble_model --allocator qubo --risk-aversion 100
 #
 # Needs ~/quant/alpaca.env with your Alpaca *paper* keys (never copied anywhere else):
 #   APCA_API_KEY_ID=PK...

@@ -3,7 +3,7 @@
 # (re)starts live paper trading there. Run from the repository root after training:
 #
 #   deploy/deploy_gcp.sh VM ZONE [MODEL] [-- extra engine flags]
-#   deploy/deploy_gcp.sh quant-vm us-east1-b ensemble_model -- --online-lr 0.001
+#   deploy/deploy_gcp.sh quant-vm us-east1-b ensemble_model -- --allocator qubo --risk-aversion 100
 #
 # MODEL is the name under models/ (default ensemble_model); use what compare_methods.py
 # selected, and its gamma / online learning rate as extra flags. MODEL_ONLY=1 skips the image
