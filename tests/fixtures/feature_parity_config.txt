@@ -8,6 +8,7 @@ n_qubits=5
 reps=2
 bandwidth=0.5
 label_horizon=6
+label_hurdle=0.0004
 val_start_ts=0
 test_start_ts=0
 input_dim=67

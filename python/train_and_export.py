@@ -32,7 +32,7 @@ import torch.nn as nn
 
 from bar_schema import FEE_HURDLE_PCT, LABEL_HORIZON
 from native_model import write_native
-from quantum_features import N_CLASSICAL, FeatureConfig, classical_features, model_inputs
+from quantum_features import N_CLASSICAL, FeatureConfig, classical_features, context_features, model_inputs
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -183,7 +183,8 @@ def per_ticker_classical(df, cfg):
         c = classical_features(g["raw_spread"].to_numpy(), g["raw_ofi"].to_numpy(),
                                g["raw_delta"].to_numpy(), g["raw_vol"].to_numpy(), cfg)
         y = relabel(g["raw_price"].to_numpy(), cfg.label_horizon, cfg.label_hurdle) if custom else g["target"].to_numpy()
-        out[sym] = (c, y, g["timestamp"].to_numpy())
+        ctx = context_features(g["timestamp"].to_numpy(), g["raw_price"].to_numpy()) if cfg.has_context else None
+        out[sym] = (c, y, g["timestamp"].to_numpy(), ctx)
     return out
 
 
@@ -194,8 +195,8 @@ class WindowSet:
         rows, ends, targets, stamps = [], [], [], []
         offset = 0
         first = max(cfg.min_warmup, cfg.seq_len) - 1  # Same readiness rule as the C++ pipeline
-        for sym, (c, y, ts) in classical.items():
-            rows.append(model_inputs(c, cfg))
+        for sym, (c, y, ts, ctx) in classical.items():
+            rows.append(model_inputs(c, cfg, ctx))
             valid = np.arange(first, len(c))
             valid = valid[y[valid] >= 0]
             ends.append(valid + offset)
@@ -319,7 +320,7 @@ def train_seeds(make_model, data, fit, inner, label, n_inputs, seeds):
     return members
 
 
-def train_and_export(val_ts=None, test_ts=None, seeds=SEEDS, horizon=LABEL_HORIZON, hurdle=FEE_HURDLE_PCT):
+def train_and_export(val_ts=None, test_ts=None, seeds=SEEDS, horizon=LABEL_HORIZON, hurdle=FEE_HURDLE_PCT, features=3):
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     print(f"[+] Loading {CSV_FILE}")
     df = load_ticks()
@@ -330,7 +331,10 @@ def train_and_export(val_ts=None, test_ts=None, seeds=SEEDS, horizon=LABEL_HORIZ
     if not val_ts <= test_ts:
         raise SystemExit("[-] --val-start must not be after --test-start")
 
-    base_cfg = FeatureConfig(val_start_ts=val_ts, test_start_ts=test_ts, label_horizon=horizon, label_hurdle=hurdle)
+    base_cfg = FeatureConfig(feature_version=features, val_start_ts=val_ts, test_start_ts=test_ts, label_horizon=horizon,
+                             label_hurdle=hurdle)
+    print(f"[+] Features v{features}: microstructure" + (" + market context (time of day, today, gap, 1d/5d, 20d/50d trend, "
+                                                        "vol ratio)" if base_cfg.has_context else " only"))
     print(f"[+] Labels: return over the next {horizon} bars ({5 * horizon} min) beyond +/-{1e4 * hurdle:g} bp")
     train_ts = timeline[timeline < val_ts]
     inner_ts = int(train_ts[int(len(train_ts) * (1.0 - INNER_FRAC))])
@@ -349,7 +353,8 @@ def train_and_export(val_ts=None, test_ts=None, seeds=SEEDS, horizon=LABEL_HORIZ
     print(f"[+] Samples: {len(fit)} fit | {len(inner)} inner | {len(val)} val | {len(test)} test")
 
     print(f"[+] Training (all choices on the inner split; {seeds} random starts per GRU):")
-    raw_members = train_seeds(lambda: QuantGRU(raw.dim), raw, fit, inner, "gru_raw", N_CLASSICAL, seeds)
+    # The raw GRU reads the row prefix without the quantum part: classical (+ context in v3)
+    raw_members = train_seeds(lambda: QuantGRU(raw.dim), raw, fit, inner, "gru_raw", raw.dim, seeds)
 
     best_bw, best_loss, qset = None, np.inf, None
     for bw in BANDWIDTHS:
@@ -412,10 +417,12 @@ if __name__ == "__main__":
     parser.add_argument("--seeds", type=int, default=SEEDS, help=f"random starts per GRU, averaged (default {SEEDS})")
     parser.add_argument("--horizon", type=int, default=LABEL_HORIZON,
                         help=f"label: return over this many bars ahead (default {LABEL_HORIZON} = 30 min; signal_lab.py compares horizons)")
+    parser.add_argument("--features", type=int, choices=[2, 3], default=3,
+                        help="3 (default): microstructure + market context inputs; 2: microstructure only (the earlier models)")
     parser.add_argument("--hurdle", type=float, default=FEE_HURDLE_PCT,
                         help=f"label: |return| above this is BUY/SELL, else HOLD (default {FEE_HURDLE_PCT})")
     args = parser.parse_args()
     if args.horizon < 1:
         parser.error("--horizon must be at least 1 bar")
     CSV_FILE, MODEL_DIR = args.data, args.model_dir
-    train_and_export(args.val_start, args.test_start, args.seeds, args.horizon, args.hurdle)
+    train_and_export(args.val_start, args.test_start, args.seeds, args.horizon, args.hurdle, args.features)

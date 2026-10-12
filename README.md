@@ -45,16 +45,18 @@ python python/regime_study.py                              # trend & volatility 
 
 # Pick the trading configuration by walk-forward validation (3 folds before the test period):
 # candidates = {quantum, ensemble, q_veto_short} x QUBO gamma {0 (= greedy), 25, 100}
-#              x risk layer {none, trend, trend+vol}, plus the model-free trend / hold baselines
+#              x risk layer {none, trend, vol, trend+vol, long, long+vol}, plus the model-free
+#              trend and (volatility-targeted) hold baselines; models trade at 2x the cost
 # (q_veto_short: quantum GRU trades, only its SELL calls need the raw GRU's agreement).
 # Each fold retrains on data before it; score = mean fold Sharpe - 1 SE. Then one look at test,
 # long/short P&L split, and a model_runner pass (C++ accuracy, signal strength, latency).
-python python/compare_methods.py --data data/alpaca_ticks.csv   # --horizon 24 trains the GRUs for a 2-hour label
+python python/compare_methods.py --data data/alpaca_sip_5y.csv --horizon 12   # 1-hour label (signal_lab's best)
 # Then check the result is skill and not market drift or luck (seconds, no training):
 # vs buy & hold, beta-adjusted market-neutral P&L, and a random-direction permutation test
-python python/sanity_check.py --data data/alpaca_ticks.csv
+python python/sanity_check.py --data data/alpaca_sip_5y.csv --workdir runs/alpaca_sip_5y_h12
 # And how risky it is (luck test, Sharpe interval, 1-12 month loss and drawdown odds):
-python python/monte_carlo.py runs/alpaca_ticks/fold*/bt_ensemble_g100_trend.equity.csv runs/alpaca_ticks/final/bt_ensemble_g100_trend.equity.csv
+# (use the selected candidate's files, e.g. bt_ensemble_g100_long_vol for ensemble, gamma 100, risk long+vol)
+python python/monte_carlo.py runs/alpaca_sip_5y_h12/fold*/bt_ensemble_g100_long_vol.equity.csv runs/alpaca_sip_5y_h12/final/bt_ensemble_g100_long_vol.equity.csv
 
 # 2. Train. Splits by time: 60% train / 20% validation / 20% test. Early stopping, quantum
 #    bandwidth and probability calibration use the last 20% of the training window, so the
@@ -227,8 +229,8 @@ without it otherwise.
 Three questions decide whether the model can earn a profit that lasts, and each has a tool.
 
 **Is there an edge, and at which horizon?** `signal_lab.py` takes the same 5-minute CSV and, for
-horizons of 5 minutes to the close, measures how much each input says about the next move (daily
-rank correlation with a t-statistic) and how a simple walk-forward model on all of them trades
+horizons of 5 minutes to the close, measures how much each input says about the next move (rank
+correlation over the whole sample, t-statistic clustered by day) and how a simple walk-forward model on all of them trades
 after the measured spread and fees, next to always-long (the market's drift). It runs in a minute
 or two, so it is where to look for a better label horizon and better inputs before spending hours
 retraining the GRU; then train it on what holds up: `compare_methods.py --horizon N`. The inputs
@@ -236,12 +238,29 @@ are price-based (multi-scale returns in units of recent volatility, overnight ga
 volatility ratio, range, distance from the 20/50-day averages, the market's moves), so they mean the
 same on IEX and SIP bars and can be studied on years of SIP history. On the 125 days of IEX bars the
 GRU's 30-minute calls were no better than chance and its trades lost several times the spread, so
-the current inputs alone do not carry a tradable edge at that horizon.
+the microstructure inputs alone do not carry a tradable edge at that horizon.
+
+On five years of SIP bars (2021-2026, out of sample over the last three): 5-minute and to-the-close
+predictions lose; 30 minutes to 4 hours make money when only predicted moves of 2-3x the cost are
+traded (1 hour: +3.1 bp per trade after costs, Sharpe 0.95; 30 minutes: +2.3 bp, 0.86), though over
+three years a Sharpe of 0.95 is only about 1.6 standard errors and it is the best of 18 tries. At
+4 hours plain always-long did better (market drift). All of the edge was in longs (+4 to +8 bp in
+every regime, most in high volatility and in downtrends, i.e. buying dips); shorts lost in every
+regime. The strongest inputs were time of day, today's move, the 5-day move, the distance from the
+50-day average and the volatility ratio, none of which the GRU saw, hence feature version 3:
+
+**Feature version 3** (`train_and_export.py --features 3`, the default; `src/context_features.hpp`,
+mirrored in `python/quantum_features.py` and parity-tested): the GRU's input row gains eight market
+context inputs after the five microstructure ones (classical | context | quantum lift), in units
+of the ticker's recent volatility: time of day, today's move, the overnight gap, the 1- and 5-day
+moves, the distance from the 20- and 50-day averages and the short/long volatility ratio. The raw
+GRU reads the classical and context inputs, the quantum GRU all 75. Price-only, so training on SIP
+history carries over to IEX bars live. Version 2 models keep working.
 
 **Does "trade more in uptrends, less in downtrends" work?** `regime_study.py` tests it on real
 prices with costs and no look-ahead: the S&P 500 and NASDAQ daily 1999-2018 and the US stock market
 monthly 1927-2018 (bundled with `pip install arch`; `--alpaca SPY,QQQ,...` uses your tickers since
-2016). Against buy & hold:
+2016, each and as an equal-weight portfolio). Against buy & hold:
 
 | | Sharpe | max drawdown | bad year (worst 5%) |
 |---|---|---|---|
@@ -255,20 +274,32 @@ not on the S&P 500 1999-2018, p = 0.09-0.19). They lag in strong
 bull markets (S&P 2009-2018: 0.78 -> 0.54) and only work slowly: a 20-day trend is worse than none,
 150-300 days works. Trends are a months-scale effect, not a 5-minute one.
 
+On the six tickers 2016-2026 (Alpaca, adjusted) volatility targeting was the rule that held up:
+Sharpe +0.10 to +0.20 on five of six (AMD +0.01; shuffled-history p <= 0.05 on five), maximum
+drawdown roughly halved on all six (SPY 34% -> 19%, AAPL 39% -> 20%, NVDA 66% -> 23%, AMD 65% -> 26%)
+and the bad-case year cut by half or more, at the price of a lower total return in that strong bull
+market (it is invested less: NVDA 37% of the time). The 200-day trend helped SPY, QQQ and NVDA and
+hurt AAPL, MSFT and AMD, so on single stocks it is not reliable. (Those six were picked knowing how
+well they did; buy & hold Sharpe ratios near 1 are not a forecast.)
+
 The engine's risk layer applies it, decided on daily closes (`src/regime.hpp`), as options the
-walk-forward compares (`--risk none trend trend+vol`, `--trend-days 200`, `--vol-target 0.15`):
+walk-forward compares (`--risk none trend vol trend+vol long long+vol`, `--trend-days 200`,
+`--vol-target 0.15`, `--min-edge 2` for the models):
 
 * `--trend-days N`: the model may only trade with each ticker's N-day trend: long or flat while
   the last close is above its N-day average, short or flat below. Positions against a new trend
   are closed.
 * `--vol-target X`: new positions are sized by min(1, X / the ticker's annual volatility over
   the last `--vol-days` 20 days), so turbulent stocks and turbulent weeks get smaller positions.
+  The baselines' held positions are resized daily when more than 25% off (trades `RESIZE_*`).
+* `--long-only`: the model's sell calls mean flat, never short.
 * `--min-edge X`: the predicted move must beat X times the round-trip cost (and an open position
   is kept until the prediction turns against it by more than X times the one-way cost), so it trades only when the
   expected gain clearly pays for the trade.
 * `--signal trend`: no model; equal weight, long each ticker while above its trend average, else
   flat, rebalanced once a day (with `--vol-target`, sized by volatility). `--signal hold` is always
-  long, the benchmark. A model has to beat the trend baseline to be worth its complexity.
+  long; with `--vol-target` it is the volatility-targeted portfolio from the study above, a strategy
+  in its own right; without, the benchmark. A model has to beat these to be worth its complexity.
 
 The trend needs N completed days before it can trade (live, the warm-up history is extended to
 cover it); compare_methods.py warns when the data before the first fold is shorter.
@@ -293,7 +324,7 @@ can get, which is what sizes the account.
 | `--verify-qubo` | off | Solve every bar's QUBO by brute force too and report how often SA found the optimum. |
 | `--model`, `--config`, `--data`, `--trades` | | Paths. Default model `../models/ensemble_model.weights`; `--data -` reads ticks from stdin (for a live feed). |
 | `--status-every S` | `300` live, `0` otherwise | Results summary every S seconds while the market is open (hourly heartbeat while closed). |
-| `--trend-days N`, `--vol-target X`, `--vol-days N`, `--min-edge X` | off, off, 20, 1 | Risk layer, see above. |
+| `--trend-days N`, `--vol-target X`, `--vol-days N`, `--min-edge X`, `--long-only` | off, off, 20, 1, off | Risk layer, see above. |
 | `--signal model\|trend\|hold` | `model` | `trend` / `hold`: model-free baselines (equal weight, daily). |
 | `--equity PATH` | | Equity after every bar, for `monte_carlo.py`. |
 

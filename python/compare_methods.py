@@ -21,10 +21,15 @@ learning rate, with --online-lrs], where model is (--models)
 and the risk layer is (--risk)
     none          the model's signal as is
     trend         only trades in the direction of each ticker's --trend-days trend
-    trend+vol     ... and sizes positions by --vol-target / the ticker's volatility
-plus two model-free baselines in the same folds: "trend" (long each ticker while it is above
-its trend average, else flat; with and without vol targeting) and "hold" (always long, a
-reference that is never selected). A model has to beat them to be worth its complexity.
+    vol           sizes positions by --vol-target / the ticker's volatility
+    trend+vol     both
+    long          long only: sell calls mean flat (signal_lab.py: shorts lost in every regime)
+    long+vol      long only, sized by volatility
+plus model-free baselines in the same folds: "trend" (long each ticker while it is above its
+trend average, else flat; with and without vol targeting), "hold" with vol targeting (always
+long, sized and resized by volatility: the rule that helped on all six tickers 2016-2026) and
+plain "hold" (a reference that is never selected). A model has to beat them to be worth its
+complexity.
 Long and short P&L are reported separately. Finally model_runner (C++ inference, no trading)
 scores every model on the last fold and on test: accuracy, signal strength, latency.
 Results go to <workdir>/results.csv.
@@ -86,11 +91,13 @@ def log_name(c):
 
 
 def risk_flags(risk, trend_days, vol_target):
-    return {"none": [], "trend": ["--trend-days", str(trend_days)],
-            "trend+vol": ["--trend-days", str(trend_days), "--vol-target", str(vol_target)]}[risk]
+    return {"none": [], "trend": ["--trend-days", str(trend_days)], "vol": ["--vol-target", str(vol_target)],
+            "trend+vol": ["--trend-days", str(trend_days), "--vol-target", str(vol_target)],
+            "long": ["--long-only"], "long+vol": ["--long-only", "--vol-target", str(vol_target)]}[risk]
 
 
 def backtest(engine, data, model_dir, feats, gamma, online_lr, risk, risk_args, start, end, log):
+    trend_days, vol_target, min_edge = risk_args
     # Baselines ignore the model but the engine still loads one (any fold model will do)
     model_file = MODELS["quantum"] if feats in BASELINES else MODELS[feats]
     cmd = [str(engine), "--data", str(data), "--model", str(model_dir / f"{model_file}.weights"),
@@ -102,7 +109,9 @@ def backtest(engine, data, model_dir, feats, gamma, online_lr, risk, risk_args, 
         cmd += ["--online-lr", str(online_lr)]
     if feats in BASELINES:
         cmd += ["--signal", feats]
-    cmd += risk_flags(risk, *risk_args)
+    elif min_edge != 1.0:
+        cmd += ["--min-edge", str(min_edge)]
+    cmd += risk_flags(risk, trend_days, vol_target)
     out = subprocess.run(cmd, capture_output=True, text=True)
     log.write_text(out.stdout + out.stderr)
     if out.returncode != 0:
@@ -124,6 +133,8 @@ def side_pnl(trades_csv):
     with trades_csv.open() as f:
         for r in csv.DictReader(f):
             price, units = float(r["fill_price"]), abs(float(r["units_traded"]))
+            if r["action"].startswith("RESIZE_") and not r["action"].startswith("RESIZE_CLOSE"):
+                continue  # volatility resizing of a held position (approximation: P&L at the original size)
             if r["action"] in ("OPEN_LONG", "OPEN_SHORT"):
                 open_pos[r["ticker"]] = (1 if r["action"] == "OPEN_LONG" else -1, price, units)
             elif r["ticker"] in open_pos:
@@ -173,15 +184,20 @@ def main():
                    help="online learning rates to compare, e.g. 0 0.001 0.003 (0 = off; no retraining needed)")
     p.add_argument("--models", nargs="+", default=["quantum", "ensemble", "q_veto_short"], choices=list(MODELS),
                    help="model candidates (default drops q_veto, last in every comparison so far)")
-    p.add_argument("--risk", nargs="+", default=["none", "trend", "trend+vol"], choices=["none", "trend", "trend+vol"],
+    p.add_argument("--risk", nargs="+", default=["none", "trend", "vol", "trend+vol", "long", "long+vol"],
+                   choices=["none", "trend", "vol", "trend+vol", "long", "long+vol"],
                    help="risk layers to compare")
     p.add_argument("--trend-days", type=int, default=200,
                    help="trend average for the trend risk layer and baseline, trading days (default 200: on real index data "
                         "150-300 worked and 20-50 did not; needs that much history before the first fold)")
     p.add_argument("--vol-target", type=float, default=0.15, help="annual volatility target for trend+vol")
+    p.add_argument("--min-edge", type=float, default=2.0,
+                   help="model candidates trade only when the predicted move beats this multiple of the round-trip cost "
+                        "(default 2: signal_lab.py's k=2-3 beat k=1 at every horizon from 30 minutes to 4 hours)")
     p.add_argument("--no-baselines", action="store_true", help="skip the model-free trend / hold baselines")
     p.add_argument("--horizon", type=int, help="label horizon in bars passed to training (default: train_and_export's, 6)")
     p.add_argument("--hurdle", type=float, help="label hurdle passed to training")
+    p.add_argument("--features", type=int, choices=[2, 3], help="model inputs passed to training (default 3: with market context)")
     p.add_argument("--min-trades", type=float, default=5.0, help="minimum average round trips per fold to be selectable")
     p.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1), help="parallel backtests")
     p.add_argument("--skip-train", action="store_true", help="reuse models already in <workdir>; train only missing folds")
@@ -191,7 +207,8 @@ def main():
 
     data = a.data.resolve()
     engine = a.engine.resolve()
-    workdir = (a.workdir or PROJECT_ROOT / "runs" / (data.stem + (f"_h{a.horizon}" if a.horizon else ""))).resolve()
+    workdir = (a.workdir or PROJECT_ROOT / "runs" / (data.stem + (f"_h{a.horizon}" if a.horizon else "")
+                                                       + ("_v2" if a.features == 2 else ""))).resolve()
     timeline = np.unique(pl.read_csv(data, columns=["timestamp"])["timestamp"].to_numpy())
     test_start = int(timeline[int(len(timeline) * (1 - TEST_FRAC))])
     pre = timeline[timeline < test_start]
@@ -199,17 +216,19 @@ def main():
     edges = [int(pre[first + (len(pre) - first) * k // a.folds]) for k in range(a.folds)] + [test_start]
     candidates = [(f, g, lr, r) for f in a.models for g in a.gammas for lr in a.online_lrs for r in a.risk]
     if not a.no_baselines:
-        candidates += [("trend", 0.0, 0.0, "trend"), ("trend", 0.0, 0.0, "trend+vol"), ("hold", 0.0, 0.0, "none")]
-    risk_args = (a.trend_days, a.vol_target)
-    label_args = ([] if a.horizon is None else ["--horizon", str(a.horizon)]) + ([] if a.hurdle is None else ["--hurdle", str(a.hurdle)])
+        candidates += [("trend", 0.0, 0.0, "trend"), ("trend", 0.0, 0.0, "trend+vol"), ("hold", 0.0, 0.0, "vol"),
+                       ("hold", 0.0, 0.0, "none")]
+    risk_args = (a.trend_days, a.vol_target, a.min_edge)
+    label_args = ([] if a.horizon is None else ["--horizon", str(a.horizon)]) + ([] if a.hurdle is None else ["--hurdle", str(a.hurdle)]) \
+        + ([] if a.features is None else ["--features", str(a.features)])
     print(f"[+] {len(timeline)} bars | {a.folds} walk-forward folds from {edges[0]} | test from {test_start}")
     print(f"[+] {len(candidates)} candidates: {', '.join(a.models)} x gamma {a.gammas} x online lr {a.online_lrs} x risk {a.risk}"
-          + ("" if a.no_baselines else " + trend / hold baselines"))
+          + ("" if a.no_baselines else " + trend / hold baselines") + f" | models trade at {a.min_edge:g}x the round-trip cost")
     # The trend rule needs --trend-days completed days before it can trade
     # The risk layer needs --trend-days (and 21 days for the volatility) completed days before it can trade
     days_before = trading_days_before(timeline, edges[0])
-    need = max([a.trend_days if (r != "none" or not a.no_baselines) else 0 for r in a.risk] +
-               [21 if ("trend+vol" in a.risk or not a.no_baselines) else 0])
+    need = max([a.trend_days if (r in ("trend", "trend+vol") or not a.no_baselines) else 0 for r in a.risk] +
+               [21 if (any("vol" in r for r in a.risk) or not a.no_baselines) else 0])
     if days_before < need:
         print(f"[!] only {days_before} trading days before fold 1, the risk layer needs {need}: those candidates stay flat "
               f"until then. Fetch more history (fetch_alpaca_ticks.py --days 1825) or lower --trend-days.")
@@ -220,7 +239,7 @@ def main():
     usage = subprocess.run([str(engine), "--help"], capture_output=True, text=True).stdout
     if any(lr > 0 for lr in a.online_lrs) and "--online-lr" not in usage:
         sys.exit(f"[-] {engine} is older than the code (no --online-lr): rebuild it with  cmake --build build")
-    if (any(r != "none" for r in a.risk) or not a.no_baselines) and "--trend-days" not in usage:
+    if (any(r != "none" for r in a.risk) or not a.no_baselines) and ("resized" not in usage or "--long-only" not in usage):
         sys.exit(f"[-] {engine} is older than the code (no risk layer): rebuild it with  cmake --build build")
 
     def need_training(model_dir):
@@ -228,9 +247,10 @@ def main():
             return True
         cfg = dict(l.split("=", 1) for l in (model_dir / "quant_model_config.txt").read_text().split() if "=" in l)
         stale = (a.horizon is not None and int(cfg.get("label_horizon", 6)) != a.horizon) or \
-                (a.hurdle is not None and abs(float(cfg.get("label_hurdle", 0.0004)) - a.hurdle) > 1e-12)
+                (a.hurdle is not None and abs(float(cfg.get("label_hurdle", 0.0004)) - a.hurdle) > 1e-12) or \
+                int(cfg.get("feature_version", 2)) != (a.features or 3)
         if stale:
-            print(f"    {model_dir}: trained for another label horizon/hurdle, retraining")
+            print(f"    {model_dir}: trained for another label horizon/hurdle/feature version, retraining")
         return stale
 
     fold_results = []
@@ -259,9 +279,10 @@ def main():
                       "short": sum(fr[c]["short_pnl"] for fr in fold_results)}
 
     def active(c):  # enough activity for its Sharpe to mean something; the trend baseline holds for days
-        return summary[c]["exposure"] >= 10.0 if c[0] == "trend" else summary[c]["trades"] >= a.min_trades
+        return summary[c]["exposure"] >= 10.0 if c[0] in BASELINES else summary[c]["trades"] >= a.min_trades
 
-    selectable = [c for c in candidates if c[0] != "hold" and active(c) and summary[c]["score"] > 0]
+    reference = ("hold", 0.0, 0.0, "none")  # plain buy & hold: the yardstick, not a strategy
+    selectable = [c for c in candidates if c != reference and active(c) and summary[c]["score"] > 0]
     chosen = max(selectable, key=lambda c: summary[c]["score"]) if selectable else None
 
     with (workdir / "results.csv").open("w", newline="") as f:
@@ -283,7 +304,7 @@ def main():
               f"{sum(x > 0 for x in s['sharpes']):>6}/{a.folds}{s['trades']:>11.1f}{s['long']:>11.2f}{s['short']:>11.2f}"
               f"{t['sharpe']:>13.2f}{t['return_pct']:>11.2f}{t['round_trips']:>7.0f}{t['long_pnl']:>9.2f}{t['short_pnl']:>9.2f}")
     print("(long $ / short $: gross P&L of closed long / short round trips on $10k; WF columns sum all folds;\n"
-          " trend / hold: model-free baselines, equal weight in every ticker; hold is a reference, never selected)")
+          " trend / hold: model-free baselines, equal weight in every ticker; plain hold is a reference, never selected)")
 
     if chosen is None:
         print("\nNo candidate had a positive walk-forward score with enough trades: no consistent edge, "

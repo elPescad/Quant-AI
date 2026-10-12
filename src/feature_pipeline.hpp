@@ -6,8 +6,11 @@
 // that both produce the same numbers (tests/fixtures/feature_parity.csv).
 //
 //   raw tick -> EWMA z-scores (spread, ofi, delta, vol) + RLS AR(1) phi of OFI
-//            -> [optional] ZZ quantum feature map lift (5 qubits -> 62 Pauli expectations)
+//            -> [feature_version 3] 8 market context inputs (context_features.hpp)
+//            -> [optional] ZZ quantum feature map lift of the 5 (5 qubits -> 62 Pauli expectations)
 //            -> rolling window [seq_len, input_dim] for the GRU
+// Row layout: classical | context | quantum, so a model that reads a prefix of the row (the
+// raw GRU in the ensemble and veto models) sees the classical and context inputs.
 
 #include <algorithm>
 #include <cmath>
@@ -20,13 +23,14 @@
 #include <vector>
 
 #include "ar_estimator.hpp"
+#include "context_features.hpp"
 #include "market_data.hpp"
 #include "quantum_sim.hpp"
 
 inline constexpr int kNumClassicalFeatures = 5; // spread, ofi, delta, vol, ar_phi
 
 struct FeatureConfig {
-    int feature_version = 2;
+    int feature_version = 2; // 3 = with the market context inputs
     int seq_len = 30;
     int ewma_span = 500;
     int min_warmup = 30;
@@ -41,8 +45,9 @@ struct FeatureConfig {
     int64_t test_start_ts = 0; // First timestamp of the held-out test period
 
     int input_dim() const {
-        return kNumClassicalFeatures + (quantum_lift ? 2 * ((1 << n_qubits) - 1) : 0);
+        return kNumClassicalFeatures + (quantum_lift ? 2 * ((1 << n_qubits) - 1) : 0) + (has_context() ? kNumContextFeatures : 0);
     }
+    bool has_context() const { return feature_version >= 3; }
 
     // key=value file written by python/train_and_export.py next to the model
     static FeatureConfig load(const std::string& path) {
@@ -78,7 +83,7 @@ struct FeatureConfig {
         get_l("val_start_ts", c.val_start_ts);
         get_l("test_start_ts", c.test_start_ts);
 
-        if (c.feature_version != 2) throw std::runtime_error("Unsupported feature_version in " + path);
+        if (c.feature_version != 2 && c.feature_version != 3) throw std::runtime_error("Unsupported feature_version in " + path);
         if (c.n_qubits != kNumClassicalFeatures) throw std::runtime_error("n_qubits must equal the 5 classical features");
         if (kv.count("input_dim") && std::stoi(kv["input_dim"]) != c.input_dim()) {
             throw std::runtime_error("input_dim in " + path + " does not match the configured pipeline");
@@ -192,9 +197,16 @@ private:
         classical[4] = phi_feature(ar_);
 
         for (int i = 0; i < kNumClassicalFeatures; ++i) out[i] = static_cast<float>(classical[i]);
+        int off = kNumClassicalFeatures;
+        if (cfg_.has_context()) {
+            double ctx[kNumContextFeatures] = {};
+            if (std::isfinite(t.raw_price) && t.raw_price > 0.0f) context_.update(t.timestamp, t.raw_price, ctx);
+            for (int i = 0; i < kNumContextFeatures; ++i) out[off + i] = static_cast<float>(ctx[i]);
+            off += kNumContextFeatures;
+        }
         if (cfg_.quantum_lift) {
             qmap_.lift(classical, lifted_.data());
-            for (size_t i = 0; i < lifted_.size(); ++i) out[kNumClassicalFeatures + i] = static_cast<float>(lifted_[i]);
+            for (size_t i = 0; i < lifted_.size(); ++i) out[off + i] = static_cast<float>(lifted_[i]);
         }
     }
 
@@ -205,6 +217,7 @@ private:
     RollingWindow window_;
     std::vector<float> row_;
     std::vector<double> lifted_;
+    ContextFeatures context_;
     uint64_t count_ = 0;
 };
 

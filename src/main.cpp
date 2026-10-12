@@ -77,6 +77,7 @@ struct EngineOptions {
     double vol_target = 0.0;  // > 0: size positions by min(1, target / annual volatility)
     int vol_days = 20;
     double min_edge = 1.0;    // expected move must beat this multiple of the round-trip cost
+    bool long_only = false;   // model sell calls mean "flat", never short
     // Live mode (Alpaca)
     bool live = false;
     bool paper_orders = false; // mirror positions into the Alpaca paper account
@@ -106,9 +107,11 @@ void usage() {
                  "  --verify-qubo          check every SA solution against brute force\n"
                  "Risk layer (decided on daily closes; evidence: python/regime_study.py):\n"
                  "  --trend-days N         trade only in the direction of each ticker's N-day trend (default 0 = off)\n"
-                 "  --vol-target X         size positions by min(1, X / annual volatility), e.g. 0.15 (default 0 = off)\n"
+                 "  --vol-target X         size positions by min(1, X / annual volatility), e.g. 0.15 (default 0 = off);\n"
+                 "                         the trend / hold baselines' held positions are resized daily (25% band)\n"
                  "  --vol-days N           days of daily returns for that volatility (default 20)\n"
                  "  --min-edge X           expected move must beat X times the round-trip cost (default 1)\n"
+                 "  --long-only            the model's sell calls mean flat, never short\n"
                  "  --signal model|trend|hold   trend: no model, long each ticker while above its trend average,\n"
                  "                         else flat; hold: always long (benchmark). Equal weight, rebalanced daily\n"
                  "  --equity PATH          write the equity after every bar (for python/monte_carlo.py)\n"
@@ -160,6 +163,7 @@ bool parse_args(int argc, char** argv, EngineOptions& o) {
         else if (a == "--vol-target") o.vol_target = std::stod(next());
         else if (a == "--vol-days") o.vol_days = std::stoi(next());
         else if (a == "--min-edge") o.min_edge = std::stod(next());
+        else if (a == "--long-only") o.long_only = true;
         else if (a == "--live") o.live = true;
         else if (a == "--paper-orders") o.paper_orders = true;
         else if (a == "--live-check") o.live_check = (i + 1 < argc && argv[i + 1][0] != '-') ? std::stoi(next()) : 20;
@@ -390,6 +394,8 @@ struct EngineStats {
     long decisions = 0;     // signals that reached the risk layer
     long against_trend = 0; // ... set to flat because they opposed the trend (or it was unknown)
     double size_sum = 0.0;  // vol-target size multipliers of those decisions
+    long resizes = 0;       // baselines: held positions resized to their volatility target
+    long no_shorts = 0;     // sell calls turned into flat by --long-only
 
     long quoted_ticks = 0; // Ticks carrying a measured bid-ask spread
 };
@@ -510,7 +516,9 @@ public:
         if (stats_.decisions && (opt_.trend_days > 0 || opt_.vol_target > 0.0))
             std::cout << " | " << (opt_.signal == "model" ? "against the trend: " : "flat: ")
                       << 100.0 * stats_.against_trend / stats_.decisions << "% of " << stats_.decisions << " decisions"
-                      << (opt_.vol_target > 0.0 ? ", avg size x" + num(stats_.size_sum / stats_.decisions, 2) : std::string());
+                      << (opt_.vol_target > 0.0 ? ", avg size x" + num(stats_.size_sum / stats_.decisions, 2) : std::string())
+                      << (stats_.resizes ? ", " + std::to_string(stats_.resizes) + " resizes" : std::string());
+        if (stats_.no_shorts) std::cout << " | sell calls kept flat: " << stats_.no_shorts;
         std::cout << "\n"
                   << "==================================================\n";
         if (rows_skipped.load() > 0) std::cout << "[!] Skipped " << rows_skipped.load() << " malformed CSV rows\n";
@@ -842,10 +850,15 @@ public:
 private:
 
     // Trend filter: a signal against the ticker's trend (or while the trend is unknown) becomes
-    // "flat"; vol target: the new position's size, 0 while the volatility is unknown
+    // "flat"; long only: so does a sell call; vol target: the new position's size, 0 while the
+    // volatility is unknown
     void apply_risk_layer(const TickerState& st, const std::string& name, double& expected_return,
                           std::unordered_map<std::string, double>& sizes) {
         stats_.decisions++;
+        if (opt_.long_only && expected_return < 0.0) {
+            expected_return = 0.0;
+            stats_.no_shorts++;
+        }
         if (opt_.trend_days > 0 && expected_return * st.regime.trend() <= 0.0 && expected_return != 0.0) {
             expected_return = 0.0;
             stats_.against_trend++;
@@ -878,14 +891,25 @@ private:
             sizes[name] = size;
             stats_.size_sum += size;
         }
-        if (!targets.empty()) portfolio_.rebalance(last_tick_id_, targets, &sizes);
+        if (targets.empty()) return;
+        portfolio_.rebalance(last_tick_id_, targets, &sizes);
+        // Volatility targeting is continuous: held positions follow their size too (when more than
+        // kResizeBand off, so day-to-day noise in the volatility estimate does not churn)
+        if (opt_.vol_target > 0.0) {
+            const double w = 1.0 / std::max<size_t>(1, asset_names_.size());
+            for (const auto& [name, dir] : targets)
+                if (dir != 0 && portfolio_.direction(name) == dir) stats_.resizes += portfolio_.resize(last_tick_id_, name, w * sizes[name], kResizeBand);
+        }
     }
+
+    static constexpr double kResizeBand = 0.25;
 
     std::string risk_text() const {
         std::string s = opt_.signal == "model" ? "model signal" : (opt_.signal == "trend" ? "trend baseline (no model)" : "hold baseline (always long)");
         if (opt_.trend_days > 0) s += ", trend " + std::to_string(opt_.trend_days) + "d";
         if (opt_.vol_target > 0.0) s += ", vol target " + num(100.0 * opt_.vol_target, 0) + "%";
         if (opt_.min_edge != 1.0) s += ", min edge x" + num(opt_.min_edge, 1);
+        if (opt_.long_only && opt_.signal == "model") s += ", long only";
         return s;
     }
 

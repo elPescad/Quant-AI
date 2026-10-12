@@ -116,6 +116,64 @@ public:
         }
     }
 
+    // Moves a held position toward `fraction` of equity (same direction) when it is off by more
+    // than `band` (relative): volatility targeting for positions held for days. A reduction
+    // realises its share of the P&L (into gains / losses, not a round trip); an addition
+    // averages into the entry price. Returns true when it traded.
+    bool resize(int tick_id, const std::string& ticker, double fraction, double band) {
+        auto it = positions_.find(ticker);
+        if (it == positions_.end() || it->second.direction() == 0) return false;
+        Position& pos = it->second;
+        const int dir = pos.direction();
+        const double equity = get_total_equity();
+        if (equity <= 0.0 || pos.current_mid_price <= 0.0) return false;
+        const double target = equity * std::clamp(fraction, 0.0, 1.0);
+        const double current = std::abs(pos.units) * pos.current_mid_price;
+        if (target <= 0.0) return close(tick_id, ticker, pos, dir > 0 ? "RESIZE_CLOSE_LONG" : "RESIZE_CLOSE_SHORT");
+        if (std::abs(current - target) <= band * target) return false;
+        if (current > target) {
+            const double units = (current - target) / pos.current_mid_price;
+            const double fill = dir > 0 ? bid(pos) : ask(pos);
+            const double gross = units * fill;
+            const double fee = gross * p_.fee_rate;
+            const double entry_fee = pos.entry_fee * units / std::abs(pos.units);
+            fees_paid_ += fee;
+            pos.entry_fee -= entry_fee;
+            double pnl;
+            if (dir > 0) {
+                cash_balance_ += gross - fee;
+                pnl = gross - fee - units * pos.avg_price;
+                pos.units -= units;
+            } else {
+                cash_balance_ -= gross + fee;
+                pnl = units * pos.avg_price - gross - fee;
+                pos.units += units;
+            }
+            pnl -= entry_fee;
+            (pnl > 0.0 ? gains_ : losses_) += pnl;
+            log_trade(tick_id, ticker, dir > 0 ? "RESIZE_SELL" : "RESIZE_COVER", units, fill);
+        } else {
+            const double usd = std::min(target - current, room_usd());
+            if (usd < 10.0) return false;
+            const double fill = dir > 0 ? ask(pos) : bid(pos);
+            const double units = usd / fill;
+            const double fee = usd * p_.fee_rate;
+            fees_paid_ += fee;
+            pos.entry_fee += fee;
+            const double held = std::abs(pos.units);
+            pos.avg_price = (held * pos.avg_price + units * fill) / (held + units);
+            if (dir > 0) {
+                cash_balance_ -= usd + fee;
+                pos.units += units;
+            } else {
+                cash_balance_ += usd - fee;
+                pos.units -= units;
+            }
+            log_trade(tick_id, ticker, dir > 0 ? "RESIZE_BUY" : "RESIZE_SHORT", units, fill);
+        }
+        return true;
+    }
+
     // Close every open position at the last mark +/- capped half spread
     void liquidate_all(int tick_id) {
         for (auto& [ticker, pos] : positions_) {
@@ -231,12 +289,19 @@ private:
         const double equity = get_total_equity();
         if (equity <= 0.0) return 0.0;
         const double target = equity * p_.position_weight * std::clamp(mult, 0.0, 1.0);
+        return std::max(0.0, std::min(target, room_usd()));
+    }
+
+    // Dollars any new exposure may use without breaching the leverage or cash limits
+    double room_usd() const {
+        const double equity = get_total_equity();
+        if (equity <= 0.0) return 0.0;
         // Fees reduce equity, so solve gross + usd <= lev * (equity - usd * fee) for usd
         const double exposure_room = (equity * p_.max_gross_leverage - get_gross_exposure()) /
                                      (1.0 + p_.max_gross_leverage * p_.fee_rate);
         // Short proceeds sit in cash but are owed back, so they are not buying power
         const double free_cash = std::max(0.0, cash_balance_ - get_short_liability()) / (1.0 + p_.fee_rate);
-        return std::max(0.0, std::min({target, exposure_room, free_cash}));
+        return std::max(0.0, std::min(exposure_room, free_cash));
     }
 
     void open(int tick_id, const std::string& ticker, Position& pos, int dir, double mult = 1.0) {

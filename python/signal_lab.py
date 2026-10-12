@@ -7,8 +7,8 @@ spending hours retraining it.
 
 Horizons are in bars (6 = 30 minutes, the GRU's current label) or "close" (to the session's last
 bar). For each one:
-  1. Information per input: the daily rank correlation (IC) of each input with the return over
-     the horizon, averaged over days, with its t-statistic. |t| above 3 deserves attention;
+  1. Information per input: the rank correlation (IC) of each input with the return over the
+     horizon, with a t-statistic clustered by day. |t| above 3 deserves attention;
      below 2 is indistinguishable from noise.
   2. Walk-forward model: ridge regression on all inputs, refit on everything before each fold
      and scored on the fold (out of sample), with a cost-aware rule: trade when the predicted
@@ -154,19 +154,21 @@ def round_trip_cost(d):
 
 
 def daily_ic(day, x, y):
-    """Mean and t-stat of the per-day Spearman correlation."""
-    df = pd.DataFrame({"d": day, "x": x, "y": y})
-    g = df.groupby("d")
-    rx = g["x"].rank()
-    ry = g["y"].rank()
-    cx = rx - rx.groupby(df["d"]).transform("mean")
-    cy = ry - ry.groupby(df["d"]).transform("mean")
-    num = (cx * cy).groupby(df["d"]).sum()
-    den = np.sqrt((cx ** 2).groupby(df["d"]).sum() * (cy ** 2).groupby(df["d"]).sum())
-    ic = (num / den.replace(0, np.nan)).dropna()
-    if len(ic) < 3:
+    """Rank correlation over the whole sample, with a t-statistic clustered by day.
+
+    Ranks are global and nothing is centred within a day: past and future returns of the
+    same day share the day's endpoints, so a within-day correlation is biased negative even
+    for a random walk (to-the-close by about -0.14). Each day contributes the mean product of
+    the standardised ranks; the t-statistic comes from the spread of those daily means, which
+    keeps the overlapping bars of one day from counting as independent evidence."""
+    zx = pd.Series(x).rank().to_numpy()
+    zy = pd.Series(y).rank().to_numpy()
+    zx = (zx - zx.mean()) / zx.std()
+    zy = (zy - zy.mean()) / zy.std()
+    daily = pd.Series(zx * zy).groupby(np.asarray(day)).mean()
+    if len(daily) < 3:
         return float("nan"), float("nan")
-    return float(ic.mean()), float(ic.mean() / ic.std(ddof=1) * math.sqrt(len(ic)))
+    return float(np.mean(zx * zy)), float(daily.mean() / daily.std(ddof=1) * math.sqrt(len(daily)))
 
 
 def ridge(X, y, lam):
@@ -211,7 +213,7 @@ def main():
     label = {1: "5m", 6: "30m", 12: "1h", 24: "2h", 48: "4h", 78: "1d", "close": "close"}
 
     # 1. Information per input
-    print(f"\n1. Information per input: daily rank IC x 100 (t-stat) with the return over each horizon; * = feed-dependent")
+    print(f"\n1. Information per input: rank IC x 100 (t-stat by day) with the return over each horizon; * = feed-dependent")
     print(f"   {'input':<16}" + "".join(f"{label.get(h, str(h)):>14}" for h in horizons))
     fwd_by_h = {h: targets(d, h) for h in horizons}
     for name in names:

@@ -5,7 +5,8 @@ buy & hold on real prices, with costs, no look-ahead and Monte Carlo tests.
     python python/regime_study.py                    # bundled real data:
                                                      #   S&P 500 and NASDAQ daily 1999-2018,
                                                      #   US stock market monthly 1926-2018 (Fama-French)
-    python python/regime_study.py --alpaca SPY,QQQ,AAPL,NVDA,MSFT,AMD   # Alpaca daily bars since 2016
+    python python/regime_study.py --alpaca SPY,QQQ,AAPL,NVDA,MSFT,AMD   # Alpaca daily bars since 2016,
+                                                     #   each ticker and their equal-weight portfolio
     python python/regime_study.py --csv prices.csv   # columns date,close[,symbol]
 
 Rules (decided on day t's close, held over day t+1; cash earns the risk-free rate when known, else 0):
@@ -122,21 +123,29 @@ def stationary_bootstrap_idx(n, length, n_paths, block, rng):
     return idx
 
 
-def shuffled_null(ret, close0, cash, freq, n_perm, rng, s):
-    """Sharpe improvement over buy & hold of every rule on randomly reordered histories
-    (scored over the same periods `s` as the real history)."""
+def rule_returns(px, ret, cash, freq):
+    """Each rule applied to every column (ticker) separately; equal capital per ticker, i.e. the
+    average of the tickers' returns. Returns {rule: (returns, average exposure)}."""
+    per = [rules_for(px[:, j], ret[:, j], freq) for j in range(ret.shape[1])]
+    out = {}
+    for name in per[0]:
+        rs, hs = zip(*[strategy_returns(ret[:, j], per[j][name], cash) for j in range(ret.shape[1])])
+        out[name] = (np.mean(rs, axis=0), np.mean(hs, axis=0))
+    return out, per
+
+
+def shuffled_null(ret, px0, cash, freq, n_perm, rng, s):
+    """Sharpe improvement over buy & hold of every rule on randomly reordered histories (all
+    tickers' days shuffled together, keeping their correlation), scored over the periods `s`."""
     per_year = 252 if freq == "D" else 12
     out = {}
     for _ in range(n_perm):
-        r = rng.permutation(ret)
-        close = close0 * np.cumprod(1.0 + r)
-        bh = None
-        for name, w in rules_for(close, r, freq).items():
-            sr, held = strategy_returns(r, w, cash)
-            s_ = metrics(sr[s], cash[s], per_year)["Sharpe"]
-            if bh is None:
-                bh = s_
-            out.setdefault(name, []).append(s_ - bh)
+        r = ret[rng.permutation(len(ret))]
+        px = px0[None, :] * np.cumprod(1.0 + r, axis=0)
+        results, _ = rule_returns(px, r, cash, freq)
+        bh = metrics(results["buy & hold"][0][s], cash[s], per_year)["Sharpe"]
+        for name, (sr, _) in results.items():
+            out.setdefault(name, []).append(metrics(sr[s], cash[s], per_year)["Sharpe"] - bh)
     return {k: np.array(v) for k, v in out.items()}
 
 
@@ -221,23 +230,22 @@ def fmt_table(rows, cols, first="rule", width=24):
 
 
 def study(title, close, rf, freq, n_perm, rng, robustness=True):
+    """close: one price series, or a DataFrame of several (an equal-weight portfolio of the rules)."""
     per_year = 252 if freq == "D" else 12
     block = 21 if freq == "D" else 6
-    close = close.dropna()
+    close = (close.to_frame() if isinstance(close, pd.Series) else close).dropna()
     ret = close.pct_change().to_numpy()[1:]
+    px = close.to_numpy()[1:]
     dates = close.index[1:]
     cash = np.zeros(len(ret)) if rf is None else rf.reindex(dates).fillna(0.0).to_numpy()
-    rules = rules_for(close.to_numpy()[1:], ret, freq)
-    warm = max(int(np.argmax(~np.isnan(w))) for w in rules.values())  # every rule live from here on
+    full, per = rule_returns(px, ret, cash, freq)
+    warm = max(int(np.argmax(~np.isnan(w))) for rules in per for w in rules.values())  # every rule live from here on
     warm += 1  # first period held under every rule
     s = slice(warm, None)
     print(f"\n=== {title}: {dates[warm].date()} .. {dates[-1].date()} ({len(ret) - warm} periods; cost {COST_BP:g} bp per "
           f"unit of turnover; cash {'= T-bill rate' if rf is not None else 'earns 0'})")
 
-    results = {}
-    for name, w in rules.items():
-        r, held = strategy_returns(ret, w, cash)
-        results[name] = (r[s], held[s])
+    results = {name: (r[s], h[s]) for name, (r, h) in full.items()}
     cols = ["CAGR %", "vol %", "Sharpe", "max DD %", "invested %", "switches/yr"]
     print(fmt_table([(n, metrics(r, cash[s], per_year, h)) for n, (r, h) in results.items()], cols))
 
@@ -253,13 +261,13 @@ def study(title, close, rf, freq, n_perm, rng, robustness=True):
         ns = [20, 50, 100, 150, 200, 250, 300] if freq == "D" else [3, 6, 8, 10, 12, 15, 18]
         row = []
         for n in ns:
-            r, _ = strategy_returns(ret, above(close.to_numpy()[1:], n), cash)
+            r = np.mean([strategy_returns(ret[:, j], above(px[:, j], n), cash)[0] for j in range(ret.shape[1])], axis=0)
             row.append(f"{n}:{metrics(r[s], cash[s], per_year)['Sharpe']:.2f}")
         print(f"  trend rule Sharpe by moving-average length ({'days' if freq == 'D' else 'months'}): {'  '.join(row)}"
               f"   (buy & hold {metrics(results['buy & hold'][0], cash[s], per_year)['Sharpe']:.2f})")
 
     # Monte Carlo 1: shuffled histories (no trends, no volatility clustering)
-    null = shuffled_null(ret, float(close.iloc[0]), cash, freq, n_perm, rng, s)
+    null = shuffled_null(ret, close.to_numpy()[0], cash, freq, n_perm, rng, s)
     bh_r = results["buy & hold"][0]
     bh_s = metrics(bh_r, cash[s], per_year)["Sharpe"]
     # Monte Carlo 2: paired stationary bootstrap of the Sharpe improvement
@@ -299,6 +307,12 @@ def main():
         data = load_bundled()
     for title, close, rf, freq in data:
         study(title, close, rf, freq, a.permutations, rng)
+    daily = [(t, c) for t, c, _, f in data if f == "D"]
+    if len(daily) > 1 and (a.alpaca or a.csv):
+        names = [t.split()[0] for t, _ in daily]
+        panel = pd.concat({n: c for n, (_, c) in zip(names, daily)}, axis=1).dropna()
+        study(f"Equal-weight portfolio of {', '.join(names)} (each rule per ticker, 1/{len(names)} of the capital each)",
+              panel, None, "D", a.permutations, rng)
 
 
 if __name__ == "__main__":

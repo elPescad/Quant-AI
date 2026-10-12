@@ -37,6 +37,8 @@ def round_trips(trades_csv, ts_of_tick):
     with trades_csv.open() as f:
         for r in csv.DictReader(f):
             tick, price, units = int(r["tick_id"]), float(r["fill_price"]), abs(float(r["units_traded"]))
+            if r["action"].startswith("RESIZE_") and not r["action"].startswith("RESIZE_CLOSE"):
+                continue  # volatility resizing of a held position
             if r["action"] in ("OPEN_LONG", "OPEN_SHORT"):
                 open_pos[r["ticker"]] = (1 if r["action"] == "OPEN_LONG" else -1, tick, price, units)
             elif r["ticker"] in open_pos:
@@ -57,7 +59,7 @@ def main():
     p.add_argument("--model", help="candidate model (default: the selected one in results.csv)")
     p.add_argument("--gamma", type=float)
     p.add_argument("--online-lr", type=float, default=0.0)
-    p.add_argument("--risk", default="none", choices=["none", "trend", "trend+vol"])
+    p.add_argument("--risk", default="none", choices=["none", "trend", "vol", "trend+vol", "long", "long+vol"])
     p.add_argument("--permutations", type=int, default=20000)
     a = p.parse_args()
     workdir = (a.workdir or PROJECT_ROOT / "runs" / a.data.resolve().stem).resolve()

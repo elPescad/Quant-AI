@@ -123,14 +123,14 @@ static std::vector<std::string> split_csv(const std::string& line) {
     return out;
 }
 
-static void test_feature_parity(const std::string& fixture_dir) {
-    std::cout << "[parity] C++ feature pipeline vs python/quantum_features.py\n";
-    std::ifstream in(fixture_dir + "/feature_parity.csv");
+static void test_feature_parity(const std::string& fixture_dir, const std::string& name = "feature_parity") {
+    std::cout << "[parity] C++ feature pipeline vs python/quantum_features.py (" << name << ")\n";
+    std::ifstream in(fixture_dir + "/" + name + ".csv");
     if (!in.is_open()) {
         std::cout << "  [SKIP] fixture not found in " << fixture_dir << " (run python/quantum_features.py)\n";
         return;
     }
-    FeatureConfig cfg = FeatureConfig::load(fixture_dir + "/feature_parity_config.txt");
+    FeatureConfig cfg = FeatureConfig::load(fixture_dir + "/" + name + "_config.txt");
     std::string line;
     std::getline(in, line);
     CHECK(is_tick_csv_header(line), "fixture header");
@@ -152,6 +152,33 @@ static void test_feature_parity(const std::string& fixture_dir) {
     }
     std::cout << "  rows " << rows << ", max |C++ - Python| = " << max_err << "\n";
     CHECK(rows > 0 && max_err < 1e-5, "C++ and Python features agree");
+}
+
+// The context inputs on their own, on a series where every value is known: prices alternate
+// x1.001 and /1.001 every bar, 78 bars a day, so every return is +-log(1.001)
+static void test_context_features() {
+    std::cout << "[context] market context inputs\n";
+    ContextFeatures c;
+    double out[kNumContextFeatures];
+    const int64_t mon = 1772409600 + 14 * 3600 + 30 * 60; // Monday 2026-03-02 09:30 EST
+    const double r = std::log(1.001);
+    double p = 100.0;
+    for (int d = 0; d < 3; ++d) {
+        for (int b = 0; b < 78; ++b) {
+            p *= ((d * 78 + b) % 2) ? 1.0 / 1.001 : 1.001;
+            c.update(mon + d * 86400 + b * 300, p, out);
+            if (d == 0 && b == 0) CHECK(out[ContextFeatures::kTimeOfDay] == -1.0 && out[ContextFeatures::kToday] == 0.0, "09:30: -1, rest 0");
+            if (d == 0 && b == 77) CHECK(out[ContextFeatures::kTimeOfDay] == 1.0, "15:55: +1");
+            if (d == 0 && b == 77) CHECK(out[ContextFeatures::kDay1] == 0.0, "1-day move unknown before 78 earlier bars");
+        }
+    }
+    CHECK(near(out[ContextFeatures::kVolRatio], 0.0, 1e-9), "constant volatility: short/long ratio 0");
+    CHECK(std::abs(out[ContextFeatures::kGap]) > 0.0 && near(std::abs(out[ContextFeatures::kGap]), 1.0 / std::sqrt(78.0), 1e-9),
+          "gap of one bar's move = 1/sqrt(78) daily volatilities");
+    CHECK(near(out[ContextFeatures::kDay1], 0.0, 1e-9), "78 bars back is an even lag: no 1-day move");
+    CHECK(near(std::abs(out[ContextFeatures::kToday]), r / (r * std::sqrt(77.0)), 1e-9) || near(out[ContextFeatures::kToday], 0.0, 1e-9),
+          "today's move in units of sqrt(bars) volatilities");
+    CHECK(out[ContextFeatures::kTrend20] == 0.0 && out[ContextFeatures::kDay5] == 0.0, "20-day trend and 5-day move need more history");
 }
 
 // ------------------------------------------------------------------------------------
@@ -417,6 +444,27 @@ static void test_portfolio() {
     pm6.mark(0, "X", 100.0f, 0.0f);
     pm6.rebalance(0, {{"X", 1}});
     CHECK(!pm6.mark(1, "X", 95.0f, 0.0f) && pm6.direction("X") == 1, "no stop-loss when risk exits are off");
+
+    // Volatility resizing of a held position
+    PortfolioManager pm7(p6);
+    pm7.mark(0, "R", 100.0f, 0.0f);
+    pm7.rebalance(0, {{"R", 1}});                 // 25% of $10k
+    CHECK(!pm7.resize(1, "R", 0.22, 0.25), "within the band: no trade");
+    pm7.mark(1, "R", 110.0f, 0.0f);
+    CHECK(pm7.resize(1, "R", 0.10, 0.25), "far above target: reduce");
+    CHECK(near(pm7.units("R") * 110.0, 0.10 * pm7.get_total_equity(), 1.0), "reduced to 10% of equity");
+    CHECK(pm7.get_gains() > 0.0 && pm7.get_total_trades() == 0, "the reduction realised a gain, not a round trip");
+    CHECK(pm7.resize(2, "R", 0.30, 0.25), "far below target: add");
+    CHECK(near(pm7.units("R") * 110.0, 0.30 * pm7.get_total_equity(), 2.0), "added to 30% of equity");
+    pm7.mark(3, "R", 105.0f, 0.0f);
+    pm7.rebalance(3, {{"R", 0}});
+    CHECK(near(pm7.get_gains() + pm7.get_losses(), pm7.get_pnl(), 1e-6), "flat: gains + losses = P&L, through resizes");
+    PortfolioManager pm8(p6);
+    pm8.mark(0, "S", 50.0f, 0.0f);
+    pm8.rebalance(0, {{"S", -1}});
+    CHECK(pm8.resize(1, "S", 0.05, 0.25) && near(-pm8.units("S") * 50.0, 0.05 * pm8.get_total_equity(), 1.0), "shorts resize too");
+    pm8.rebalance(2, {{"S", 0}});
+    CHECK(near(pm8.get_gains() + pm8.get_losses(), pm8.get_pnl(), 1e-6), "short: gains + losses = P&L");
 }
 
 // Daily regime: New York trading days, trend vs its N-day average, volatility and sizing
@@ -679,6 +727,8 @@ int main(int argc, char** argv) {
     const std::string fixtures = argc > 1 ? argv[1] : "tests/fixtures";
     test_quantum_gates();
     test_feature_parity(fixtures);
+    test_feature_parity(fixtures, "feature_parity_v3");
+    test_context_features();
     test_ar_estimator();
     test_qubo();
     test_allocator();
