@@ -3,11 +3,12 @@
 
 // Market context inputs (feature_version 3): where this bar sits in the session and in the
 // last days, in units of the ticker's recent 5-minute volatility. The microstructure inputs
-// only see the last bars' range, signed volume and price change; python/signal_lab.py found
-// these slower, price-only quantities (time of day, today's move, the 1- and 5-day moves,
-// distance from the 20/50-day averages, the volatility ratio) carrying most of the
-// out-of-sample information on five years of bars. Price-only, so they mean the same on IEX
-// and SIP bars. python/quantum_features.py (ContextFeatures) mirrors this step for step;
+// only see the last bars' range, signed volume and price change. On five years of bars the
+// walk-forward ridge in python/signal_lab.py leaned most on these slower, price-only quantities
+// (time of day, today's move, the 1- and 5-day moves, distance from the 20/50-day averages, the
+// volatility ratio); one by one they are weak (|rank IC| <= 0.05; today's move and the market's
+// day carry into the close at t ~ 2.5), so whether they help the GRU is for the walk-forward to
+// show. Price-only, so they mean the same on IEX and SIP bars. python/quantum_features.py (ContextFeatures) mirrors this step for step;
 // tests/fixtures/feature_parity_v3.csv checks they agree.
 
 #include <algorithm>

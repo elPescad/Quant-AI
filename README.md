@@ -246,8 +246,13 @@ traded (1 hour: +3.1 bp per trade after costs, Sharpe 0.95; 30 minutes: +2.3 bp,
 three years a Sharpe of 0.95 is only about 1.6 standard errors and it is the best of 18 tries. At
 4 hours plain always-long did better (market drift). All of the edge was in longs (+4 to +8 bp in
 every regime, most in high volatility and in downtrends, i.e. buying dips); shorts lost in every
-regime. The strongest inputs were time of day, today's move, the 5-day move, the distance from the
-50-day average and the volatility ratio, none of which the GRU saw, hence feature version 3:
+regime. One by one the inputs are weak: the largest rank ICs are a 1-bar reversal at 5 minutes
+(too small to pay the spread) and today's move and the market's day continuing into the close
+(intraday momentum, t ~ 2.5); the walk-forward model's overall rank IC out of sample is ~0, so its
+trading profit comes from the few large predictions, mostly long. The inputs it leaned on most were
+time of day, today's move, the 5-day move, the distance from the 50-day average and the volatility
+ratio, none of which the GRU saw, hence feature version 3 (whether they help it is for the
+walk-forward to show):
 
 **Feature version 3** (`train_and_export.py --features 3`, the default; `src/context_features.hpp`,
 mirrored in `python/quantum_features.py` and parity-tested): the GRU's input row gains eight market
